@@ -9,10 +9,18 @@
 
 pub mod bot;
 pub mod hand_history;
+pub mod leaderboard;
+pub mod matchmaking;
+pub mod rating;
+pub mod runner;
 pub mod stats;
 pub mod table;
 
 pub use bot::{Bot, BotFactory, HandResult, HandStart, MatchInfo, PublicEvent};
+pub use leaderboard::{LeaderboardFile, LeaderboardRow};
+pub use matchmaking::{make_schedule, MatchmakingConfig, Schedule};
+pub use rating::{PairwiseElo, RatingConfig, RatingSystem, ScoreMode, TableOutcome};
+pub use runner::{run, BotEntry, RunError, RunOutput, RunSpec, RunState};
 pub use stats::SeatStats;
 pub use table::{
     run_table, BlindLevel, Blinds, IllegalActionPolicy, SeatResult, StackPolicy, TableConfig,
