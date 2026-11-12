@@ -13,7 +13,7 @@ use engine::{Deck, GameFormat, HandSetup, HandState, MAX_SEATS};
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// What happens to stacks between hands in cash mode.
@@ -229,6 +229,8 @@ pub enum TableError {
         /// Why it was rejected.
         reason: String,
     },
+    /// Stopped through [`TableHooks::cancel`].
+    Cancelled,
 }
 
 impl std::fmt::Display for TableError {
@@ -245,6 +247,7 @@ impl std::fmt::Display for TableError {
                 f,
                 "illegal action by {bot} (seat {seat}): {action} ({reason})"
             ),
+            TableError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -264,7 +267,7 @@ struct Table<'a> {
     rng: Xoshiro256PlusPlus,
     hh: Option<HandHistoryWriter>,
     names: Vec<String>,
-    progress: Option<&'a AtomicU64>,
+    hooks: TableHooks<'a>,
 }
 
 /// Plays a table. `seats[i]` is the index into `factories` of the bot in seat `i`.
@@ -279,18 +282,29 @@ pub fn run_table(
     cfg: &TableConfig,
     seed: u64,
 ) -> Result<TableResult, TableError> {
-    run_table_with_progress(format, seats, factories, cfg, seed, None)
+    run_table_with_hooks(format, seats, factories, cfg, seed, TableHooks::default())
 }
 
-/// [`run_table`] that also adds 1 to `progress` after every finished hand (for progress
-/// displays; it does not affect results).
-pub fn run_table_with_progress(
+/// Optional observers and controls for a running table. They never change results: a table
+/// either completes identically to [`run_table`] or stops with [`TableError::Cancelled`].
+#[derive(Clone, Copy, Default)]
+pub struct TableHooks<'a> {
+    /// Incremented after every finished hand.
+    pub hands_done: Option<&'a AtomicU64>,
+    /// Checked before every hand; when set the table stops with [`TableError::Cancelled`].
+    pub cancel: Option<&'a AtomicBool>,
+    /// Called after every finished hand (after `hands_done` is incremented).
+    pub on_hand: Option<&'a (dyn Fn() + Sync)>,
+}
+
+/// [`run_table`] with progress reporting and cooperative cancellation (see [`TableHooks`]).
+pub fn run_table_with_hooks(
     format: &GameFormat,
     seats: &[usize],
     factories: &[BotFactory],
     cfg: &TableConfig,
     seed: u64,
-    progress: Option<&AtomicU64>,
+    hooks: TableHooks<'_>,
 ) -> Result<TableResult, TableError> {
     cfg.validate()?;
     format
@@ -323,7 +337,7 @@ pub fn run_table_with_progress(
         rng: Xoshiro256PlusPlus::seed_from_u64(mix_seed(seed, STREAM_DECK, 0)),
         hh: cfg.hand_history.then(HandHistoryWriter::new),
         names,
-        progress,
+        hooks,
     };
 
     let start = cfg.starting_stack();
@@ -529,6 +543,9 @@ impl Table<'_> {
         setup: &HandSetup,
         map: &[usize; MAX_SEATS],
     ) -> Result<(), TableError> {
+        if self.hooks.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(TableError::Cancelled);
+        }
         let n = setup.n_seats;
         self.st
             .start(&self.format, setup, &self.deck)
@@ -661,8 +678,11 @@ impl Table<'_> {
             });
             hh.write_hand(hand_id, st, setup, &names[..n]);
         }
-        if let Some(p) = self.progress {
+        if let Some(p) = self.hooks.hands_done {
             p.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(f) = self.hooks.on_hand {
+            f();
         }
         Ok(())
     }

@@ -15,6 +15,41 @@ python/         PyO3 bindings (crate arena_py) + Python package `pokerarena` + e
 configs/        example TOML configs
 ```
 
+## Desktop app
+
+Double-click **`Poker Arena.app`** at the repository root (macOS) to open the Poker Arena
+window. No terminal is needed once the Python environment is built:
+
+```sh
+cd python && python3 -m venv .venv
+.venv/bin/pip install maturin numpy pytest PySide6-Essentials
+.venv/bin/maturin develop --release
+```
+
+The first time, macOS asks whether *Poker Arena* may access the folder holding the
+project (for example Documents). Click **Allow**. If you clicked Don't Allow, enable it in
+System Settings › Privacy & Security › Files & Folders.
+
+- **Settings:** variant, seats, cash or tournament (blind levels are generated from your
+  blinds), stack, blinds and ante, stack policy, duplicate mode, hands per table, rounds,
+  players per table, minimum tables per round, appearances, Elo mode and K, seed, Rust
+  threads, Python processes, decision timing, and saving.
+- **Players:** each row is a Rust bot, a Python port (`pokerarena.baselines`) or any
+  custom `module.ClassName`, with JSON params. Presets: Rust demo lineup,
+  **Python champions** (Python ports of the three top bots), Rust vs Python champions, and
+  the Python trio. A live preview shows tables per round and total hands.
+- **Run** shows a hand-level progress bar with round, tables, hands/s and ETA, then the
+  leaderboard, marking each bot as Rust or Python.
+- **Stop** is a hard stop. Rust tables stop before their next hand (microseconds), Python
+  worker processes are killed (even a bot stuck in an infinite loop), and nothing is
+  written. Closing the window mid-run does the same. Tests check that a stopped run leaves
+  no worker processes, threads, file descriptors or semaphores behind, and that a crashed
+  worker fails the run instead of hanging it.
+
+The app is a small AppleScript applet that runs `Contents/Resources/launch.sh`.
+`macos/build_app.sh` rebuilds it, and the log goes to `.poker_arena.log`. Without the app:
+`python/.venv/bin/python -c "from pokerarena.gui import main; main()"`.
+
 ## Build, test, run
 
 ```sh
@@ -31,16 +66,6 @@ cargo run --release -p cli -- leaderboard
 cd python && python3 -m venv .venv && .venv/bin/pip install maturin numpy pytest
 .venv/bin/maturin develop --release && .venv/bin/python -m pytest
 ```
-
-**Web UI.** `arena ui [--port 8080] [--host 127.0.0.1]` serves a local page at
-`http://127.0.0.1:8080/`. It shows the variant, seats, mode, blinds and stack settings, plus
-hands per table, rounds, players per table, minimum tables per round, Elo settings, seed and
-threads. It also has a player list (add, remove or edit bots and their JSON params) and a
-live preview of tables per round and total hands. While a run is going it shows a live,
-hand-level progress bar with throughput and ETA, and the full leaderboard at the end.
-Ticking "Save results & leaderboard" writes `results/<run_id>/` and updates
-`leaderboard.json` like `arena run` does. The UI starts from `configs/6max_nlh.toml` and
-runs Rust bots only.
 
 `arena run --config <file> [--seed N] [--threads N] [--rounds N] [--hands N] [--fresh]
 [--quiet] [--leaderboard F] [--results-dir D]` prints the sorted leaderboard and writes
@@ -160,6 +185,11 @@ and `params` are passed as keyword arguments. `pokerarena.Bot` is the structural
   and falls back to processes. Results are identical for any process or thread count.
 - Hooks a bot doesn't override (including `BaseBot`'s no-ops) are never called, so they cost
   nothing.
+- `pokerarena.ArenaJob` is the controllable form of `run`: `start()` runs it in the
+  background, `progress()` returns a snapshot, `stop()` is the hard stop described above,
+  and `wait()` waits for cleanup. Scripts that run Python bots must guard their entry
+  point with `if __name__ == "__main__":`, because worker processes use the `spawn`
+  start method and re-import the main script.
 - The `arena` CLI runs Rust bots only. Configs containing `python:` kinds go through
   `pokerarena.run`.
 

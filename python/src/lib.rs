@@ -10,13 +10,17 @@
 use arena::bot::{Action, Bot, HandResult, HandStart, MatchInfo, Observation, PublicEvent};
 use arena::config::ConfigFile;
 use arena::leaderboard::{render, utc_timestamp, write_results_dir};
-use arena::runner::{build_pool, run_table_external, RoundRecord};
-use arena::{BotFactory, LeaderboardFile, RunSpec, RunState, TableResult};
+use arena::runner::{build_pool, table_error, table_seed, RoundRecord, RunError};
+use arena::{
+    run_table_with_hooks, BotFactory, LeaderboardFile, RunProgress, RunSpec, RunState, TableHooks,
+    TableResult,
+};
 use engine::action::ActionKind;
 use engine::eval::{category, Evaluator};
 use engine::format::Variant;
 use engine::{Card, SeatStatus};
 use numpy::PyArray1;
+use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -24,6 +28,7 @@ use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 // ------------------------------------------------------------------------------- Action
@@ -528,6 +533,21 @@ pub struct PyRun {
     rounds: Vec<RoundRecord>,
     lb_path: PathBuf,
     lb: LeaderboardFile,
+    progress: RunProgress,
+}
+
+create_exception!(
+    _native,
+    Cancelled,
+    pyo3::exceptions::PyException,
+    "Raised by Run.run_tables when the run was cancelled with Run.cancel()."
+);
+
+fn run_err(e: RunError) -> PyErr {
+    match e {
+        RunError::Cancelled => Cancelled::new_err("run cancelled"),
+        e => PyRuntimeError::new_err(e.to_string()),
+    }
 }
 
 fn err<E: std::fmt::Display>(e: E) -> PyErr {
@@ -552,7 +572,19 @@ impl PyRun {
         fresh: bool,
         load_leaderboard: bool,
     ) -> PyResult<Self> {
-        let mut cfg = ConfigFile::parse(&config_text).map_err(err)?;
+        // TOML text, or a JSON object with the same structure (as built by the GUI).
+        let (mut cfg, config_text) = if config_text.trim_start().starts_with('{') {
+            let mut cfg: ConfigFile = serde_json::from_str(&config_text).map_err(err)?;
+            for b in &mut cfg.bots {
+                if b.params.is_null() {
+                    b.params = serde_json::json!({});
+                }
+            }
+            let text = toml::to_string(&cfg).map_err(err)?;
+            (cfg, text)
+        } else {
+            (ConfigFile::parse(&config_text).map_err(err)?, config_text)
+        };
         if let Some(s) = seed {
             cfg.run.seed = s;
         }
@@ -604,6 +636,7 @@ impl PyRun {
             rounds: Vec::new(),
             lb_path,
             lb,
+            progress: RunProgress::hidden(),
         })
     }
 
@@ -632,6 +665,38 @@ impl PyRun {
     fn ratings(&self) -> Vec<f64> {
         self.state.ratings().to_vec()
     }
+    /// True for tournament runs.
+    #[getter]
+    fn is_tournament(&self) -> bool {
+        self.spec.table.is_tournament()
+    }
+    /// Hands per table (an upper bound for tournaments).
+    #[getter]
+    fn hands_per_table(&self) -> u64 {
+        self.spec.table.hands
+    }
+    /// The effective config as TOML text (after overrides are applied on the Rust side).
+    #[getter]
+    fn config_toml(&self) -> String {
+        self.cfg_text.clone()
+    }
+    /// Hands finished by `run_tables` calls on this object so far.
+    #[getter]
+    fn hands_done(&self) -> u64 {
+        self.progress.hands_done.load(Ordering::Relaxed)
+    }
+    /// True once `cancel()` was called.
+    #[getter]
+    fn cancelled(&self) -> bool {
+        self.progress.is_cancelled()
+    }
+    /// Stops every table running in `run_tables` before its next hand (they raise
+    /// `Cancelled`); later `run_tables` calls raise immediately. Safe to call from any
+    /// thread at any time; irreversible.
+    fn cancel(&self) {
+        self.progress.request_cancel();
+    }
+
     /// Which bots are Python bots (config order).
     #[getter]
     fn python_bots(&self) -> Vec<bool> {
@@ -651,39 +716,86 @@ impl PyRun {
             .collect())
     }
 
-    /// Runs tables `table_ids` of `round` on a thread pool with the GIL released and
-    /// returns their results as JSON strings (same order as `table_ids`).
-    #[pyo3(signature = (round, table_ids, threads=None))]
+    /// Runs tables `table_ids` of `round` and returns their results as JSON strings (same
+    /// order as `table_ids`). Raises `Cancelled` if `cancel()` is called meanwhile.
+    ///
+    /// Tables seating only Rust bots run on a thread pool (`threads`, default from the
+    /// config) with the GIL released. With `threads=1` and Python bots present (e.g. in a
+    /// worker process) tables run on the calling thread with the interpreter attached, so
+    /// Python bot calls re-enter cheaply; `on_progress(hands_done)` is then called every
+    /// `every` hands.
+    #[pyo3(signature = (round, table_ids, threads=None, on_progress=None, every=256))]
     fn run_tables(
         &self,
         py: Python<'_>,
         round: usize,
         table_ids: Vec<usize>,
         threads: Option<usize>,
+        on_progress: Option<Py<PyAny>>,
+        every: u64,
     ) -> PyResult<Vec<String>> {
+        if self.progress.is_cancelled() {
+            return Err(Cancelled::new_err("run cancelled"));
+        }
         let schedule = self.state.schedule(round).map_err(err)?;
+        if let Some(&t) = table_ids.iter().find(|&&t| t >= schedule.tables.len()) {
+            return Err(err(format!("no table {t} in round {round}")));
+        }
         let threads = threads.or(self.spec.threads);
         let spec = &self.spec;
         let factories = &self.factories;
-        let run_one = |t: usize| {
-            run_table_external(spec, factories, &schedule, round, t)
-                .map(|r| serde_json::to_string(&r).unwrap())
-                .map_err(|e| e.to_string())
+        let progress = &self.progress;
+        let has_python = table_ids
+            .iter()
+            .any(|&t| schedule.tables[t].iter().any(|&b| self.is_python[b]));
+        let every = every.max(1);
+        let callback = on_progress.map(|cb| {
+            move || {
+                let n = progress.hands_done.load(Ordering::Relaxed);
+                if n.is_multiple_of(every) {
+                    Python::attach(|py| {
+                        if let Err(e) = cb.call1(py, (n,)) {
+                            e.print(py);
+                        }
+                    });
+                }
+            }
+        });
+        let run_one = |t: usize, on_hand: Option<&(dyn Fn() + Sync)>| {
+            let hooks = TableHooks {
+                hands_done: Some(&progress.hands_done),
+                cancel: Some(&progress.cancel),
+                on_hand,
+            };
+            run_table_with_hooks(
+                &spec.format,
+                &schedule.tables[t],
+                factories,
+                &spec.table,
+                table_seed(spec.seed, round, t),
+                hooks,
+            )
+            .map(|r| serde_json::to_string(&r).unwrap())
+            .map_err(|e| table_error(round, t, e))
         };
-        if threads == Some(1) {
-            // Single-threaded (e.g. a multiprocessing worker): run on this thread with the
-            // interpreter attached, so Python bot calls re-enter cheaply instead of creating
-            // a fresh thread state on a pool thread for every call.
+        if threads == Some(1) && has_python {
+            // Calling thread, interpreter attached: Python bots re-enter cheaply instead of
+            // creating a fresh thread state on a pool thread for every call. Other Python
+            // threads still get the GIL whenever bot code runs, so cancel() stays reachable.
+            let cb = callback.as_ref().map(|f| f as &(dyn Fn() + Sync));
             return table_ids
                 .iter()
-                .map(|&t| run_one(t))
+                .map(|&t| run_one(t, cb))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(PyRuntimeError::new_err);
+                .map_err(run_err);
         }
+        // Rust-only (or multi-threaded) tables: release the GIL for the whole run so other
+        // Python threads (a GUI, a stop button) stay responsive.
         let pool = build_pool(threads).map_err(err)?;
-        let res: Result<Vec<String>, String> =
-            py.detach(|| pool.install(|| table_ids.par_iter().map(|&t| run_one(t)).collect()));
-        res.map_err(PyRuntimeError::new_err)
+        let res: Result<Vec<String>, RunError> = py
+            .detach(|| pool.install(|| table_ids.par_iter().map(|&t| run_one(t, None)).collect()));
+        drop(pool);
+        res.map_err(run_err)
     }
 
     /// Merges a round: `results` are JSON TableResults in table-id order.
@@ -881,6 +993,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLegalActions>()?;
     m.add_class::<PyObservation>()?;
     m.add_class::<PyRun>()?;
+    m.add("Cancelled", m.py().get_type::<Cancelled>())?;
     m.add_function(wrap_pyfunction!(equity, m)?)?;
     m.add_function(wrap_pyfunction!(card_to_str, m)?)?;
     m.add_function(wrap_pyfunction!(parse_cards, m)?)?;

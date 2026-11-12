@@ -32,14 +32,14 @@ score_mode = "binary"
 
 [[bots]]
 name = "py_tag_loose"
-kind = "python:examples.baselines.TightAggressive"
+kind = "python:pokerarena.baselines.TightAggressive"
 params = { samples = 200, tightness = -3.0, call_margin = 0.0 }
 
 [[bots]]
 name = "py_random_passive"
-kind = "python:examples.baselines.RandomLegal"
+kind = "python:pokerarena.baselines.RandomLegal"
 params = { fold = 2.0, call = 3.0, raise = 0.2, raise_sizes = [0.5] }
 
 [[bots]]
 name = "py_station"
-kind = "python:examples.baselines.CallingStation"
+kind = "python:pokerarena.baselines.CallingStation"

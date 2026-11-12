@@ -65,3 +65,22 @@ class Crasher(BaseBot):
         if self.n % 5 == 0:
             raise RuntimeError("boom")
         return Action.check() if obs.legal.can_check else Action.call()
+
+
+class Sleeper(BaseBot):
+    """Hangs forever in act() (simulates a stuck Python bot)."""
+
+    def act(self, obs):
+        import time
+
+        time.sleep(3600)
+        return Action.fold()
+
+
+class Exiter(BaseBot):
+    """Kills its own worker process mid-hand (simulates a crashing extension/bot)."""
+
+    def act(self, obs):
+        import os
+
+        os._exit(3)

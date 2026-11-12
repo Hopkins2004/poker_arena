@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pokerarena as pa
-from examples.baselines import RandomLegal, chen_score
+from pokerarena.baselines import RandomLegal, chen_score
 
 CONFIG = (Path(__file__).parent.parent.parent / "configs" / "trio_py.toml").read_text()
 

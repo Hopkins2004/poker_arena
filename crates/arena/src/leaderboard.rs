@@ -171,7 +171,12 @@ impl LeaderboardFile {
         if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self).unwrap() + "\n")
+        // Write-then-rename so an interrupted save never leaves a truncated file.
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap() + "\n")?;
+        std::fs::rename(&tmp, path)
     }
 
     /// Starting ratings for `keys` (stored rating, or `default` for unseen bots).
@@ -267,7 +272,13 @@ pub fn write_results_dir(
     rounds: &[RoundRecord],
     rows: &[LeaderboardRow],
 ) -> std::io::Result<PathBuf> {
-    let dir = base.join(run_id);
+    // Build the directory under a hidden temporary name and rename it into place at the
+    // end, so an interrupted write never leaves a half-written results directory.
+    let final_dir = base.join(run_id);
+    let dir = base.join(format!(".{run_id}.partial"));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("config.toml"), config_text)?;
 
@@ -315,5 +326,6 @@ pub fn write_results_dir(
         serde_json::to_string_pretty(rows).unwrap() + "\n",
     )?;
     std::fs::write(dir.join("leaderboard.txt"), render(rows))?;
-    Ok(dir)
+    std::fs::rename(&dir, &final_dir)?;
+    Ok(final_dir)
 }

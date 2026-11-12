@@ -179,3 +179,77 @@ fn utc_timestamp_format() {
     assert_eq!(t.len(), 16, "{t}");
     assert!(t.starts_with("20") && t.ends_with('Z') && t.as_bytes()[8] == b'T');
 }
+
+#[test]
+fn cancellation_stops_promptly_and_cleanly() {
+    use arena::runner::{run_with_progress, RunError, RunProgress};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    let bots = entries();
+    let mut sp = spec(4);
+    sp.table.hands = 2_000_000; // would take far longer than the test allows
+    let progress = RunProgress::hidden();
+    let p2 = progress.clone();
+    let worker = std::thread::spawn(move || run_with_progress(&sp, &bots, vec![1500.0; 5], &p2));
+    let t0 = Instant::now();
+    while progress.hands_done.load(Ordering::Relaxed) < 1000 {
+        assert!(t0.elapsed() < Duration::from_secs(20), "run never started");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let t_cancel = Instant::now();
+    progress.request_cancel();
+    let res = worker.join().unwrap();
+    let stop_latency = t_cancel.elapsed();
+    assert!(
+        matches!(res, Err(RunError::Cancelled)),
+        "expected Cancelled"
+    );
+    assert!(
+        stop_latency < Duration::from_millis(500),
+        "stop took {stop_latency:?}"
+    );
+    // No further hands after the run returned.
+    let done = progress.hands_done.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(done, progress.hands_done.load(Ordering::Relaxed));
+
+    // Cancelled before starting: nothing is played.
+    let pre = RunProgress::hidden();
+    pre.request_cancel();
+    let res = run_with_progress(&spec(2), &entries(), vec![1500.0; 5], &pre);
+    assert!(matches!(res, Err(RunError::Cancelled)));
+    assert_eq!(pre.hands_done.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn hooks_do_not_change_results() {
+    use arena::{run_table, run_table_with_hooks, TableConfig, TableHooks};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let f: Vec<_> = entries().into_iter().map(|e| e.factory).collect();
+    let fmt = GameFormat::nlhe(6);
+    let cfg = TableConfig::cash(300, 1, 2, 100);
+    let plain = run_table(&fmt, &[0, 1, 2, 3, 4, 0], &f, &cfg, 9).unwrap();
+    let hands = AtomicU64::new(0);
+    let cancel = AtomicBool::new(false);
+    let calls = AtomicU64::new(0);
+    let on_hand = || {
+        calls.fetch_add(1, Ordering::Relaxed);
+    };
+    let hooked = run_table_with_hooks(
+        &fmt,
+        &[0, 1, 2, 3, 4, 0],
+        &f,
+        &cfg,
+        9,
+        TableHooks {
+            hands_done: Some(&hands),
+            cancel: Some(&cancel),
+            on_hand: Some(&on_hand),
+        },
+    )
+    .unwrap();
+    assert_eq!(plain, hooked);
+    assert_eq!(hands.load(Ordering::Relaxed), 300);
+    assert_eq!(calls.load(Ordering::Relaxed), 300);
+}

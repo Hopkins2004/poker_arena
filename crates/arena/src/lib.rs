@@ -26,6 +26,6 @@ pub use runner::{
 };
 pub use stats::SeatStats;
 pub use table::{
-    run_table, run_table_with_progress, BlindLevel, Blinds, IllegalActionPolicy, SeatResult,
-    StackPolicy, TableConfig, TableError, TableMode, TableResult,
+    run_table, run_table_with_hooks, BlindLevel, Blinds, IllegalActionPolicy, SeatResult,
+    StackPolicy, TableConfig, TableError, TableHooks, TableMode, TableResult,
 };

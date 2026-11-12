@@ -15,14 +15,16 @@ use crate::leaderboard::LeaderboardRow;
 use crate::matchmaking::{make_schedule, MatchmakingConfig, MatchmakingError, Schedule};
 use crate::rating::{PairwiseElo, RatingConfig, RatingSystem, TableOutcome};
 use crate::stats::SeatStats;
-use crate::table::{run_table, run_table_with_progress, TableConfig, TableError, TableResult};
+use crate::table::{
+    run_table, run_table_with_hooks, TableConfig, TableError, TableHooks, TableResult,
+};
 use engine::rng::mix_seed;
 use engine::GameFormat;
 pub use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Seed stream for schedules (never collides with a table id).
@@ -91,6 +93,8 @@ pub enum RunError {
     },
     /// I/O error.
     Io(std::io::Error),
+    /// Stopped through [`RunProgress::cancel`].
+    Cancelled,
 }
 
 impl std::fmt::Display for RunError {
@@ -104,6 +108,7 @@ impl std::fmt::Display for RunError {
                 error,
             } => write!(f, "round {round} table {table}: {error}"),
             RunError::Io(e) => write!(f, "io: {e}"),
+            RunError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -283,6 +288,8 @@ pub struct RunProgress {
     pub tables_total: Arc<AtomicU64>,
     /// Rounds finished so far.
     pub rounds_done: Arc<AtomicU64>,
+    /// Set to stop the run: every table stops before its next hand.
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl RunProgress {
@@ -299,7 +306,18 @@ impl RunProgress {
             tables_done: Arc::default(),
             tables_total: Arc::default(),
             rounds_done: Arc::default(),
+            cancel: Arc::default(),
         }
+    }
+
+    /// Requests cancellation (takes effect before the next hand of every table).
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// True once cancellation was requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
     }
 }
 
@@ -318,25 +336,38 @@ pub fn run_tables(
             .par_iter()
             .enumerate()
             .map(|(t, seats)| {
-                let r = run_table_with_progress(
+                let hooks = TableHooks {
+                    hands_done: Some(&progress.hands_done),
+                    cancel: Some(&progress.cancel),
+                    on_hand: None,
+                };
+                let r = run_table_with_hooks(
                     &spec.format,
                     seats,
                     factories,
                     &spec.table,
                     table_seed(spec.seed, round, t),
-                    Some(&progress.hands_done),
+                    hooks,
                 )
-                .map_err(|error| RunError::Table {
-                    round,
-                    table: t,
-                    error,
-                });
+                .map_err(|error| table_error(round, t, error));
                 progress.tables_done.fetch_add(1, Ordering::Relaxed);
                 progress.bar.inc(1);
                 r
             })
             .collect()
     })
+}
+
+/// Maps a table error, turning cancellation into [`RunError::Cancelled`].
+pub fn table_error(round: usize, table: usize, error: TableError) -> RunError {
+    match error {
+        TableError::Cancelled => RunError::Cancelled,
+        error => RunError::Table {
+            round,
+            table,
+            error,
+        },
+    }
 }
 
 /// Builds the worker pool for a spec.

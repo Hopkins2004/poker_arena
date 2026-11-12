@@ -13,6 +13,7 @@ from a config as ``kind = "python:module.ClassName"``. They are constructed as
 
 from ._native import (
     Action,
+    Cancelled,
     LegalActions,
     Observation,
     Run,
@@ -25,10 +26,14 @@ from ._native import (
     rust_bot_kinds,
 )
 from .bot import BaseBot, Bot
-from .runner import RunResult, is_free_threaded, run
+from .job import ArenaJob, Progress, RunResult, is_free_threaded
+from .runner import run
 
 __all__ = [
     "Action",
+    "ArenaJob",
+    "Cancelled",
+    "Progress",
     "BaseBot",
     "Bot",
     "LegalActions",

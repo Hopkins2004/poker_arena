@@ -9,3 +9,5 @@ __pycache__/
 /leaderboard.json
 .pytest_cache/
 /leaderboard_trio.json
+/.poker_arena.log
+.DS_Store

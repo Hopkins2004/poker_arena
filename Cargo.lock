@@ -103,6 +103,7 @@ dependencies = [
  "rand_xoshiro",
  "rayon",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -301,7 +302,6 @@ dependencies = [
  "rand_xoshiro",
  "rayon",
  "serde_json",
- "toml",
 ]
 
 [[package]]
