@@ -1,0 +1,43 @@
+# Three-bot arena with the Rust versions of tag_loose, station and random_passive.
+# Identical to configs/trio_py.toml except for the bot kinds,
+# for comparing Rust and Python bot speed:  arena run --config configs/trio_rust.toml
+# 3 bots at 6 seats: every table seats each bot twice (pooled for rating).
+
+[run]
+rounds = 5
+seed = 2026
+results_dir = "results"
+leaderboard = "leaderboard_trio.json"
+
+[format]
+variant = "nlhe"
+max_seats = 6
+
+[table]
+hands_per_table = 1000
+starting_stack_bb = 100
+blinds = { sb = 1, bb = 2, ante = 0 }
+stack_policy = "reset_each_hand"
+record_timing = true
+
+[matchmaking]
+min_appearances = 4
+allow_duplicate_bot_at_table = true
+
+[rating]
+k = 16
+score_mode = "binary"
+
+[[bots]]
+name = "tag_loose"
+kind = "tag"
+params = { samples = 200, tightness = -3.0, call_margin = 0.0 }
+
+[[bots]]
+name = "random_passive"
+kind = "random"
+params = { fold = 2.0, call = 3.0, raise = 0.2, raise_sizes = [0.5] }
+
+[[bots]]
+name = "station"
+kind = "calling_station"

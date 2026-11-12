@@ -8,3 +8,4 @@ __pycache__/
 /results/
 /leaderboard.json
 .pytest_cache/
+/leaderboard_trio.json

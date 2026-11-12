@@ -1,0 +1,45 @@
+# Three-bot arena with the Python versions of tag_loose, station and random_passive.
+# Identical to configs/trio_rust.toml except for the bot kinds,
+# for comparing Rust and Python bot speed. Python bots need pokerarena.run, e.g. from python/:
+#   .venv/bin/python -c "import pokerarena; print(pokerarena.run('../configs/trio_py.toml',
+#       leaderboard='../leaderboard_trio.json', results_dir='../results').table)"
+# 3 bots at 6 seats: every table seats each bot twice (pooled for rating).
+
+[run]
+rounds = 5
+seed = 2026
+results_dir = "results"
+leaderboard = "leaderboard_trio.json"
+
+[format]
+variant = "nlhe"
+max_seats = 6
+
+[table]
+hands_per_table = 1000
+starting_stack_bb = 100
+blinds = { sb = 1, bb = 2, ante = 0 }
+stack_policy = "reset_each_hand"
+record_timing = true
+
+[matchmaking]
+min_appearances = 4
+allow_duplicate_bot_at_table = true
+
+[rating]
+k = 16
+score_mode = "binary"
+
+[[bots]]
+name = "py_tag_loose"
+kind = "python:examples.baselines.TightAggressive"
+params = { samples = 200, tightness = -3.0, call_margin = 0.0 }
+
+[[bots]]
+name = "py_random_passive"
+kind = "python:examples.baselines.RandomLegal"
+params = { fold = 2.0, call = 3.0, raise = 0.2, raise_sizes = [0.5] }
+
+[[bots]]
+name = "py_station"
+kind = "python:examples.baselines.CallingStation"

@@ -294,7 +294,22 @@ struct PyBot {
 impl PyBot {
     fn new(py: Python<'_>, name: String, obj: Py<PyAny>) -> PyBot {
         let b = obj.bind(py);
-        let has = |m: &str| b.hasattr(m).unwrap_or(false);
+        let cls = b.get_type();
+        let base = py
+            .import("pokerarena.bot")
+            .and_then(|m| m.getattr("BaseBot"))
+            .ok();
+        // A hook counts only if the bot defines it and it is not BaseBot's no-op: calling
+        // inherited no-ops would cost a dict build and an interpreter call per event.
+        let has = |m: &str| {
+            if !b.hasattr(m).unwrap_or(false) {
+                return false;
+            }
+            match (&base, cls.getattr(m)) {
+                (Some(base), Ok(f)) => base.getattr(m).map_or(true, |bf| !f.is(&bf)),
+                _ => true,
+            }
+        };
         PyBot {
             name,
             has_new_match: has("new_match"),
@@ -647,21 +662,27 @@ impl PyRun {
         threads: Option<usize>,
     ) -> PyResult<Vec<String>> {
         let schedule = self.state.schedule(round).map_err(err)?;
-        let pool = build_pool(threads.or(self.spec.threads)).map_err(err)?;
+        let threads = threads.or(self.spec.threads);
         let spec = &self.spec;
         let factories = &self.factories;
-        let res: Result<Vec<String>, String> = py.detach(|| {
-            pool.install(|| {
-                table_ids
-                    .par_iter()
-                    .map(|&t| {
-                        run_table_external(spec, factories, &schedule, round, t)
-                            .map(|r| serde_json::to_string(&r).unwrap())
-                            .map_err(|e| e.to_string())
-                    })
-                    .collect()
-            })
-        });
+        let run_one = |t: usize| {
+            run_table_external(spec, factories, &schedule, round, t)
+                .map(|r| serde_json::to_string(&r).unwrap())
+                .map_err(|e| e.to_string())
+        };
+        if threads == Some(1) {
+            // Single-threaded (e.g. a multiprocessing worker): run on this thread with the
+            // interpreter attached, so Python bot calls re-enter cheaply instead of creating
+            // a fresh thread state on a pool thread for every call.
+            return table_ids
+                .iter()
+                .map(|&t| run_one(t))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PyRuntimeError::new_err);
+        }
+        let pool = build_pool(threads).map_err(err)?;
+        let res: Result<Vec<String>, String> =
+            py.detach(|| pool.install(|| table_ids.par_iter().map(|&t| run_one(t)).collect()));
         res.map_err(PyRuntimeError::new_err)
     }
 

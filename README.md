@@ -51,6 +51,14 @@ Apple M4 Pro (8 performance + 4 efficiency cores), release build:
 
 The bare engine loop (no `dyn Bot`, no event broadcast) runs 1.9 M 6-max hands/s on one core.
 
+**Rust vs Python bots.** `python/examples/baselines.py` holds line-by-line Python ports of
+`tag`, `random` and `calling_station`. The same three-bot arena (`configs/trio_rust.toml`
+vs `configs/trio_py.toml`: 6-max, 100k hands per table, 5 rounds, 1.5 M hands, 3 tables per
+round) took 6.2 s with Rust bots and 21.3 s with the Python ports, about 3.5× in both wall
+and CPU time. Results agree within their CIs. A Python decision costs about 1.1 µs for a
+trivial bot, against 0.01 µs in Rust. The tight-aggressive bot costs 5.5 µs against 2.6 µs,
+since its equity sampling runs in Rust in both cases.
+
 ## Writing a bot in Rust
 
 Implement `arena::Bot`. Only `act` is required:
@@ -140,6 +148,8 @@ and `params` are passed as keyword arguments. `pokerarena.Bot` is the structural
   them in table-id order before updating ratings. On free-threaded CPython (3.13t+, GIL
   disabled), `threaded=True` runs Python tables on threads instead. On GIL builds it warns
   and falls back to processes. Results are identical for any process or thread count.
+- Hooks a bot doesn't override (including `BaseBot`'s no-ops) are never called, so they cost
+  nothing.
 - The `arena` CLI runs Rust bots only. Configs containing `python:` kinds go through
   `pokerarena.run`.
 
