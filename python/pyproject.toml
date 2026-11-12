@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.24"]
 [project.optional-dependencies]
 test = ["pytest>=7"]
 gui = ["PySide6-Essentials>=6.6"]
+river = ["torch>=2.9", "matplotlib>=3.9"]  # river_net/ (value network PoC)
 
 [tool.maturin]
 module-name = "pokerarena._native"
