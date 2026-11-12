@@ -151,6 +151,26 @@ changes, so the anchors pin the scale and ratings stay comparable across runs an
 leaderboards. A bot that reliably beats `tag` ends up above 1300. Unanchored bots start at
 `[rating] initial` (1500 by default) or at their saved rating.
 
+## Preflop ranges
+
+`ranges/nlhe_6max_100bb.json` is a 6-max 100bb preflop strategy: 78 decision points (opens,
+3-bets, 4-bets, shoves) with per-hand-class frequencies, plus the 38 flop spots and 28 all-in
+spots with both players' ranges. `pokerarena.preflop` loads it:
+
+```python
+from pokerarena import preflop
+db = preflop.load()
+db.node("BTN raise 2.5bb", "BB").freqs("K9o")  # action frequencies for a hand class
+db.spot("CO raise 2.5bb, BB call").ranges        # both ranges entering the flop
+db.locate(obs)                                    # a bot's preflop decision in the tree
+```
+
+The data comes from the Leakproof preflop ranges (6max-100bb-norake 1.0.0,
+https://github.com/a-hanamoto/leakproof-preflop-ranges), licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It was converted into this format,
+with the strategy itself unchanged. [ranges/README.md](ranges/README.md) covers the tree, the
+API and the file format.
+
 ## Config format
 
 ```toml

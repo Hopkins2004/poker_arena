@@ -416,6 +416,12 @@ rank_within_category`. Categories go 0 high card, 1 pair, 2 two pair, 3 trips,
 - `hand_category(strength)` returns, for example, `"Flush"`.
 - For Omaha, use `equity(..., variant="plo")`, which applies the two-plus-three rule.
 
+**Preflop charts.** `pokerarena.preflop` holds a 6-max 100bb preflop strategy (opens, 3-bets,
+4-bets, shoves). `preflop.load().locate(obs)` finds your decision in it for a six-handed NLHE
+table, and `decision.sample(obs, rng)` returns a legal action that follows the chart. It
+returns `None` when the hand has left the chart or your hand can't be there. See
+[ranges/README.md](ranges/README.md).
+
 ## 7. Rules of the road
 
 **Determinism.** A run is reproducible bit for bit from (config, seed, bot set). Keep it

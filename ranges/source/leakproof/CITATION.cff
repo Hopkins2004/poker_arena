@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use these ranges, please credit them as below (CC BY 4.0 requires attribution)."
+title: "Leakproof preflop ranges"
+type: dataset
+version: "6max-100bb-norake 1.0.0"
+date-released: "2026-10-31"
+license: CC-BY-4.0
+authors:
+  - name: "Leakproof"
+    website: "https://playleakproof.com"
+url: "https://playleakproof.com"
+repository: "https://github.com/a-hanamoto/leakproof-preflop-ranges"
+abstract: >-
+  Preflop strategy for No-Limit Hold'em by game (players, stacks, rake): opens,
+  3-bets, 4-bets and the responses to them, by hand class, rounded so that
+  people can use them. First game: 6-max, 100bb, no rake.
+keywords:
+  - poker
+  - no-limit hold'em
+  - preflop
+  - game theory

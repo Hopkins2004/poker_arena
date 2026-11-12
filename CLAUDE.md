@@ -20,6 +20,7 @@ crates/
   cli/       # `arena` binary: bench, leaderboard
 python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` (baselines, runner, desktop GUI) + example bots
 bots/NLH/    # bots, one file each (anchored baselines)
+ranges/      # preflop range database (6-max 100bb, CC BY 4.0 source vendored) + converter; read via pokerarena.preflop
 configs/     # example TOML configs
 ```
 
