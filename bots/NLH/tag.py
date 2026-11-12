@@ -37,7 +37,7 @@ class TightAggressive(BaseBot):
     ANCHOR = 1300
 
     SAMPLES = 300        # Monte Carlo samples per postflop decision (half preflop in PLO)
-    TIGHTNESS = 0.0      # added to every preflop threshold (positive = tighter)
+    TIGHTNESS = -0.2      # added to every preflop threshold (positive = tighter)
     CALL_MARGIN = 0.05   # equity edge over pot odds required to call
 
     def __init__(self, seed: int = 0):
