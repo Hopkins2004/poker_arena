@@ -1,0 +1,47 @@
+# 6-max NLHE sit-and-go style tournaments: increasing blinds, eliminations, Elo on finishing place.
+
+[run]
+rounds = 4
+seed = 99
+
+[format]
+variant = "nlhe"
+max_seats = 6
+
+[table]
+mode = "tournament"
+hands_per_table = 2000          # safety cap; tables usually finish far earlier
+starting_stack_bb = 75
+levels = [
+  { sb = 1,  bb = 2,   ante = 0,  hands = 40 },
+  { sb = 2,  bb = 4,   ante = 0,  hands = 40 },
+  { sb = 3,  bb = 6,   ante = 1,  hands = 40 },
+  { sb = 5,  bb = 10,  ante = 1,  hands = 40 },
+  { sb = 10, bb = 20,  ante = 2,  hands = 40 },
+  { sb = 20, bb = 40,  ante = 5,  hands = 40 },
+  { sb = 50, bb = 100, ante = 10, hands = 40 },
+]
+
+[matchmaking]
+min_appearances = 4
+allow_duplicate_bot_at_table = true
+
+[rating]
+k = 16
+
+[[bots]]
+name = "tag"
+kind = "tag"
+
+[[bots]]
+name = "tag_loose"
+kind = "tag"
+params = { tightness = -3.0 }
+
+[[bots]]
+name = "random"
+kind = "random"
+
+[[bots]]
+name = "station"
+kind = "calling_station"

@@ -18,7 +18,8 @@ use crate::stats::SeatStats;
 use crate::table::{run_table, TableConfig, TableError, TableResult};
 use engine::rng::mix_seed;
 use engine::GameFormat;
-use indicatif::{ProgressBar, ProgressStyle};
+pub use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 

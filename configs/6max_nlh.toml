@@ -1,0 +1,70 @@
+# 6-max No-Limit Hold'em cash game: 7 baseline bots with different parameters.
+# 7 bots at 6 seats -> T = max(7, ceil(4*7/6)) = 7 tables per round, 6 appearances each.
+
+[run]
+rounds = 5
+seed = 2026
+# threads = 8                 # default: all cores
+results_dir = "results"
+leaderboard = "leaderboard.json"
+
+[format]
+variant = "nlhe"
+max_seats = 6
+
+[table]
+hands_per_table = 1000
+starting_stack_bb = 100
+mode = "cash"
+blinds = { sb = 1, bb = 2, ante = 0 }
+stack_policy = "reset_each_hand"
+duplicate_mode = false
+illegal_action_policy = "fold_or_check"
+record_timing = true
+hand_history = false
+
+[matchmaking]
+min_appearances = 4
+allow_duplicate_bot_at_table = true
+balance_pairs = true
+
+[rating]
+initial = 1500
+k = 16
+score_mode = "binary"
+margin_c = 30
+
+[[bots]]
+name = "tag"
+version = "1"
+kind = "tag"
+params = { samples = 300 }
+
+[[bots]]
+name = "tag_tight"
+kind = "tag"
+params = { samples = 300, tightness = 2.0 }
+
+[[bots]]
+name = "tag_loose"
+kind = "tag"
+params = { samples = 200, tightness = -3.0, call_margin = 0.0 }
+
+[[bots]]
+name = "random"
+kind = "random"
+params = { fold = 1.0, call = 2.0, raise = 1.0, raise_sizes = [0.5, 1.0] }
+
+[[bots]]
+name = "random_aggro"
+kind = "random"
+params = { fold = 1.0, call = 1.0, raise = 2.0, raise_sizes = [0.75, 1.5, 3.0] }
+
+[[bots]]
+name = "random_passive"
+kind = "random"
+params = { fold = 2.0, call = 3.0, raise = 0.2, raise_sizes = [0.5] }
+
+[[bots]]
+name = "station"
+kind = "calling_station"

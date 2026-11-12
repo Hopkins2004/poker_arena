@@ -8,6 +8,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod bot;
+pub mod config;
 pub mod hand_history;
 pub mod leaderboard;
 pub mod matchmaking;

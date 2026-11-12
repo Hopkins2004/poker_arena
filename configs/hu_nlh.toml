@@ -1,0 +1,35 @@
+# Heads-up No-Limit Hold'em, duplicate mode for variance reduction.
+
+[run]
+rounds = 3
+seed = 7
+
+[format]
+variant = "nlhe"
+max_seats = 2
+
+[table]
+hands_per_table = 2000          # 1000 deals x 2 seat rotations
+starting_stack_bb = 100
+blinds = { sb = 1, bb = 2 }
+stack_policy = "reset_each_hand"
+duplicate_mode = true
+
+[matchmaking]
+min_appearances = 4
+
+[rating]
+score_mode = "margin"
+margin_c = 30
+
+[[bots]]
+name = "tag"
+kind = "tag"
+
+[[bots]]
+name = "random"
+kind = "random"
+
+[[bots]]
+name = "station"
+kind = "calling_station"
