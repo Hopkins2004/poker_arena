@@ -96,6 +96,10 @@ since its equity sampling runs in Rust in both cases.
 
 ## Writing a bot in Rust
 
+> **[BOTS.md](BOTS.md) is the full bot-author guide**: lifecycle, every field a bot
+> receives, legal actions, rules, helpers, determinism, duplicate mode, and tested examples.
+> The two sections below are quick summaries.
+
 Implement `arena::Bot`. Only `act` is required:
 
 ```rust
@@ -297,7 +301,26 @@ distinct bots `(i, j)`:
 
 Deltas accumulate over the whole round and are applied once at round end, so results don't
 depend on table order. Each pair's update is symmetric, so total rating is conserved.
-Defaults: initial 1500, K = 16. The `RatingSystem` trait (`begin_round`, `add_table`, `end_round`, `ratings`) leaves room for
+Defaults: initial 1500, K = 16. **Choosing K.** K is a step size. It changes how fast and how noisily ratings move, not
+what a rating difference means: the 400-point logistic scale is what makes ratings
+comparable to chess (400 points ≈ 91% expected score). Each table splits K across the
+other n−1 bots, so the chess-equivalent K per pairwise comparison is K/(n−1), about K/5 at
+6-max. Chess uses 10–40 per game. Measured on the 7-bot demo (60 rounds of 1,000 hands per
+table):
+
+| K | rating noise (SD) | median move per round | rounds where the order changed |
+|---|---|---|---|
+| 16 (default) | 19 | 4 | 0–3 of 29 |
+| 100 (≈ chess K 20 per pair) | 40 | 23 | 15–21 of 29 |
+| 500 | 220 | 200 | 28–29 of 29 |
+
+Small K converges more slowly (about 35 rounds to 90% of the final top-to-bottom gap at
+K = 16, against about 20 at K = 100). Large K makes the leaderboard mostly reflect the last
+round. When one bot beats another at every table, binary Elo gaps keep widening without
+bound, at a speed set by K, so compare gaps only between runs with the same K and round
+count.
+
+The `RatingSystem` trait (`begin_round`, `add_table`, `end_round`, `ratings`) leaves room for
 TrueSkill or Plackett–Luce.
 
 The leaderboard reports Elo and its change, hands, hand-weighted bb/100, and a 95% CI of

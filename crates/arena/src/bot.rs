@@ -83,7 +83,8 @@ pub enum PublicEvent<'a> {
         /// Its hand strength (higher is better).
         strength: Strength,
     },
-    /// Chips awarded from a pot (one event per winner per pot).
+    /// Chips a seat collected at the end of the hand (one event per winning seat, summed
+    /// over the main and side pots it won).
     PotAwarded {
         /// Receiving seat.
         seat: usize,
