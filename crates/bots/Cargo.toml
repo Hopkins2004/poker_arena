@@ -1,0 +1,20 @@
+[package]
+name = "bots"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Baseline poker bots: random-legal, calling station, tight-aggressive."
+
+[dependencies]
+engine = { path = "../engine" }
+arena = { path = "../arena" }
+rand_core = "0.10"
+rand_xoshiro = "0.8"
+serde_json = "1.0.154"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "table"
+harness = false
