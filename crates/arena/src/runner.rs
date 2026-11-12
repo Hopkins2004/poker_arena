@@ -15,13 +15,15 @@ use crate::leaderboard::LeaderboardRow;
 use crate::matchmaking::{make_schedule, MatchmakingConfig, MatchmakingError, Schedule};
 use crate::rating::{PairwiseElo, RatingConfig, RatingSystem, TableOutcome};
 use crate::stats::SeatStats;
-use crate::table::{run_table, TableConfig, TableError, TableResult};
+use crate::table::{run_table, run_table_with_progress, TableConfig, TableError, TableResult};
 use engine::rng::mix_seed;
 use engine::GameFormat;
 pub use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Seed stream for schedules (never collides with a table id).
 pub const SCHEDULE_STREAM: u64 = u64::MAX;
@@ -265,6 +267,42 @@ pub fn table_seed(master: u64, round: usize, table: usize) -> u64 {
     mix_seed(master, round as u64, table as u64)
 }
 
+/// Live progress of a run, shareable across threads (clone it to observe a run from a UI).
+/// Counters only feed displays; they never affect results.
+#[derive(Clone)]
+pub struct RunProgress {
+    /// Terminal progress bar (tables); hidden for quiet runs and UIs.
+    pub bar: ProgressBar,
+    /// Hands finished so far.
+    pub hands_done: Arc<AtomicU64>,
+    /// Planned hands (an upper bound for tournaments), set when the run starts.
+    pub hands_total: Arc<AtomicU64>,
+    /// Tables finished so far.
+    pub tables_done: Arc<AtomicU64>,
+    /// Planned tables, set when the run starts.
+    pub tables_total: Arc<AtomicU64>,
+    /// Rounds finished so far.
+    pub rounds_done: Arc<AtomicU64>,
+}
+
+impl RunProgress {
+    /// Progress with a hidden terminal bar.
+    pub fn hidden() -> RunProgress {
+        RunProgress::with_bar(ProgressBar::hidden())
+    }
+    /// Progress driving the given terminal bar.
+    pub fn with_bar(bar: ProgressBar) -> RunProgress {
+        RunProgress {
+            bar,
+            hands_done: Arc::default(),
+            hands_total: Arc::default(),
+            tables_done: Arc::default(),
+            tables_total: Arc::default(),
+            rounds_done: Arc::default(),
+        }
+    }
+}
+
 /// Runs all tables of a schedule in parallel on `pool`, returning results in table-id order.
 pub fn run_tables(
     spec: &RunSpec,
@@ -272,7 +310,7 @@ pub fn run_tables(
     schedule: &Schedule,
     round: usize,
     pool: &rayon::ThreadPool,
-    progress: &ProgressBar,
+    progress: &RunProgress,
 ) -> Result<Vec<TableResult>, RunError> {
     pool.install(|| {
         schedule
@@ -280,19 +318,21 @@ pub fn run_tables(
             .par_iter()
             .enumerate()
             .map(|(t, seats)| {
-                let r = run_table(
+                let r = run_table_with_progress(
                     &spec.format,
                     seats,
                     factories,
                     &spec.table,
                     table_seed(spec.seed, round, t),
+                    Some(&progress.hands_done),
                 )
                 .map_err(|error| RunError::Table {
                     round,
                     table: t,
                     error,
                 });
-                progress.inc(1);
+                progress.tables_done.fetch_add(1, Ordering::Relaxed);
+                progress.bar.inc(1);
                 r
             })
             .collect()
@@ -319,12 +359,36 @@ pub struct RunOutput {
     pub rounds: Vec<RoundRecord>,
 }
 
-/// Runs `spec.rounds` rounds for `bots` with the given starting ratings.
+/// Runs `spec.rounds` rounds for `bots` with the given starting ratings, with a terminal
+/// progress bar unless `quiet`.
 pub fn run(
     spec: &RunSpec,
     bots: &[BotEntry],
     initial: Vec<f64>,
     quiet: bool,
+) -> Result<RunOutput, RunError> {
+    let progress = if quiet {
+        RunProgress::hidden()
+    } else {
+        let pb = ProgressBar::new(0);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner} round {msg} [{bar:40}] {pos}/{len} tables ({elapsed}, eta {eta})",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        RunProgress::with_bar(pb)
+    };
+    run_with_progress(spec, bots, initial, &progress)
+}
+
+/// [`run`] reporting through a caller-provided [`RunProgress`].
+pub fn run_with_progress(
+    spec: &RunSpec,
+    bots: &[BotEntry],
+    initial: Vec<f64>,
+    progress: &RunProgress,
 ) -> Result<RunOutput, RunError> {
     let keys = bots.iter().map(|b| b.key()).collect();
     let factories: Vec<BotFactory> = bots.iter().map(|b| b.factory.clone()).collect();
@@ -333,32 +397,27 @@ pub fn run(
     let schedules: Vec<Schedule> = (0..spec.rounds)
         .map(|r| state.schedule(r))
         .collect::<Result<_, _>>()?;
-    let total: usize = schedules.iter().map(|s| s.tables.len()).sum();
-    let pb = if quiet {
-        ProgressBar::hidden()
-    } else {
-        let pb = ProgressBar::new(total as u64);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner} round {msg} [{bar:40}] {pos}/{len} tables ({elapsed}, eta {eta})",
-            )
-            .unwrap()
-            .progress_chars("=> "),
-        );
-        pb
-    };
+    let total: u64 = schedules.iter().map(|s| s.tables.len() as u64).sum();
+    progress.tables_total.store(total, Ordering::Relaxed);
+    progress
+        .hands_total
+        .store(total * spec.table.hands, Ordering::Relaxed);
+    progress.bar.set_length(total);
     let mut rounds = Vec::with_capacity(spec.rounds);
     for (r, schedule) in schedules.into_iter().enumerate() {
-        pb.set_message(format!("{}/{}", r + 1, spec.rounds));
-        let results = run_tables(spec, &factories, &schedule, r, &pool, &pb)?;
+        progress
+            .bar
+            .set_message(format!("{}/{}", r + 1, spec.rounds));
+        let results = run_tables(spec, &factories, &schedule, r, &pool, progress)?;
         state.apply_round(&results);
         rounds.push(RoundRecord {
             round: r,
             schedule,
             results,
         });
+        progress.rounds_done.fetch_add(1, Ordering::Relaxed);
     }
-    pb.finish_and_clear();
+    progress.bar.finish_and_clear();
     Ok(RunOutput { state, rounds })
 }
 

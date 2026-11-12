@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
+mod ui;
+
 #[derive(Parser)]
 #[command(name = "arena", version, about = "Poker bot arena")]
 struct Cli {
@@ -70,6 +72,15 @@ enum Cmd {
         #[arg(long)]
         threads: Option<usize>,
     },
+    /// Start a local web UI to configure runs and watch progress and the leaderboard.
+    Ui {
+        /// Address to bind (localhost by default).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port (0 picks a free port).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
     /// Print the persisted leaderboard.
     Leaderboard {
         /// Leaderboard file.
@@ -116,6 +127,7 @@ fn main() -> ExitCode {
             threads,
         } => cmd_bench(tables, hands, variant, hand_history, threads),
         Cmd::Leaderboard { file } => cmd_leaderboard(&file),
+        Cmd::Ui { host, port } => ui::serve(&host, port),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -320,7 +332,7 @@ fn cmd_bench(
     let schedule = Schedule {
         tables: vec![vec![0; 6]; tables],
     };
-    let bar = arena::runner::ProgressBar::hidden();
+    let bar = arena::RunProgress::hidden();
     let measure = |pool: &rayon::ThreadPool| -> Result<f64, String> {
         let t = Instant::now();
         let res =

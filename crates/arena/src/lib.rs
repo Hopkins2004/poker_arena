@@ -21,9 +21,11 @@ pub use bot::{Bot, BotFactory, HandResult, HandStart, MatchInfo, PublicEvent};
 pub use leaderboard::{LeaderboardFile, LeaderboardRow};
 pub use matchmaking::{make_schedule, MatchmakingConfig, Schedule};
 pub use rating::{PairwiseElo, RatingConfig, RatingSystem, ScoreMode, TableOutcome};
-pub use runner::{run, BotEntry, RunError, RunOutput, RunSpec, RunState};
+pub use runner::{
+    run, run_with_progress, BotEntry, RunError, RunOutput, RunProgress, RunSpec, RunState,
+};
 pub use stats::SeatStats;
 pub use table::{
-    run_table, BlindLevel, Blinds, IllegalActionPolicy, SeatResult, StackPolicy, TableConfig,
-    TableError, TableMode, TableResult,
+    run_table, run_table_with_progress, BlindLevel, Blinds, IllegalActionPolicy, SeatResult,
+    StackPolicy, TableConfig, TableError, TableMode, TableResult,
 };

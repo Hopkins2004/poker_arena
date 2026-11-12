@@ -32,6 +32,16 @@ cd python && python3 -m venv .venv && .venv/bin/pip install maturin numpy pytest
 .venv/bin/maturin develop --release && .venv/bin/python -m pytest
 ```
 
+**Web UI.** `arena ui [--port 8080] [--host 127.0.0.1]` serves a local page at
+`http://127.0.0.1:8080/`. It shows the variant, seats, mode, blinds and stack settings, plus
+hands per table, rounds, players per table, minimum tables per round, Elo settings, seed and
+threads. It also has a player list (add, remove or edit bots and their JSON params) and a
+live preview of tables per round and total hands. While a run is going it shows a live,
+hand-level progress bar with throughput and ETA, and the full leaderboard at the end.
+Ticking "Save results & leaderboard" writes `results/<run_id>/` and updates
+`leaderboard.json` like `arena run` does. The UI starts from `configs/6max_nlh.toml` and
+runs Rust bots only.
+
 `arena run --config <file> [--seed N] [--threads N] [--rounds N] [--hands N] [--fresh]
 [--quiet] [--leaderboard F] [--results-dir D]` prints the sorted leaderboard and writes
 `results/<run_id>/`, which holds `config.toml`, `schedule.json`, `tables.jsonl`,

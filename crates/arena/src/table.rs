@@ -13,6 +13,7 @@ use engine::{Deck, GameFormat, HandSetup, HandState, MAX_SEATS};
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// What happens to stacks between hands in cash mode.
@@ -263,6 +264,7 @@ struct Table<'a> {
     rng: Xoshiro256PlusPlus,
     hh: Option<HandHistoryWriter>,
     names: Vec<String>,
+    progress: Option<&'a AtomicU64>,
 }
 
 /// Plays a table. `seats[i]` is the index into `factories` of the bot in seat `i`.
@@ -276,6 +278,19 @@ pub fn run_table(
     factories: &[BotFactory],
     cfg: &TableConfig,
     seed: u64,
+) -> Result<TableResult, TableError> {
+    run_table_with_progress(format, seats, factories, cfg, seed, None)
+}
+
+/// [`run_table`] that also adds 1 to `progress` after every finished hand (for progress
+/// displays; it does not affect results).
+pub fn run_table_with_progress(
+    format: &GameFormat,
+    seats: &[usize],
+    factories: &[BotFactory],
+    cfg: &TableConfig,
+    seed: u64,
+    progress: Option<&AtomicU64>,
 ) -> Result<TableResult, TableError> {
     cfg.validate()?;
     format
@@ -308,6 +323,7 @@ pub fn run_table(
         rng: Xoshiro256PlusPlus::seed_from_u64(mix_seed(seed, STREAM_DECK, 0)),
         hh: cfg.hand_history.then(HandHistoryWriter::new),
         names,
+        progress,
     };
 
     let start = cfg.starting_stack();
@@ -644,6 +660,9 @@ impl Table<'_> {
                 }
             });
             hh.write_hand(hand_id, st, setup, &names[..n]);
+        }
+        if let Some(p) = self.progress {
+            p.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }

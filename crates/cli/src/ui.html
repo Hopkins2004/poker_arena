@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poker Arena</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5d6673; --border: #dde1e6;
+    --accent: #2563eb; --accent-soft: #dbe6fd; --good: #15803d; --bad: #b91c1c;
+    --input: #ffffff; --row-alt: #f8f9fb; --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --text: #e6e9ed; --muted: #97a1ad; --border: #2a3039;
+      --accent: #5b8cff; --accent-soft: #1d2a47; --good: #4ade80; --bad: #f87171;
+      --input: #11151a; --row-alt: #1b2027; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+       margin: 0 0 12px; font-weight: 600; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           padding: 16px; box-shadow: var(--shadow); }
+  .panel + .panel, .grid + .panel, .panel + .grid { margin-top: 16px; }
+  label { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+          margin: 0 0 9px; color: var(--muted); }
+  label > span { flex: 1; }
+  input, select { background: var(--input); color: var(--text); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 5px 8px; font: inherit; width: 130px; }
+  input[type=checkbox] { width: auto; }
+  input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  input.bad { border-color: var(--bad); }
+  .hidden { display: none !important; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:nth-child(even) td { background: var(--row-alt); }
+  .bots td input, .bots td select { width: 100%; }
+  .bots td.params input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .scroll { overflow-x: auto; }
+  button { font: inherit; border-radius: 6px; border: 1px solid var(--border);
+           background: var(--panel); color: var(--text); padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff;
+                   padding: 9px 22px; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.x { padding: 2px 8px; color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .plan { color: var(--muted); }
+  .plan b { color: var(--text); }
+  .err { color: var(--bad); }
+  .bar { height: 14px; background: var(--accent-soft); border-radius: 7px; overflow: hidden; margin: 12px 0 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+  .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pos { color: var(--good); } .neg { color: var(--bad); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Poker Arena</h1>
+  <p class="sub">Configure a run, launch it, and watch the leaderboard. All bots run in the local Rust engine.</p>
+
+  <form id="form" onsubmit="return false">
+  <div class="grid">
+    <section class="panel">
+      <h2>Game</h2>
+      <label><span>Variant</span>
+        <select id="variant"><option value="nlhe">No-Limit Hold'em</option><option value="plo">Pot-Limit Omaha</option><option value="flhe">Fixed-Limit Hold'em</option></select></label>
+      <label><span>Max seats (format)</span><input id="max_seats" type="number" min="2" max="10"></label>
+      <label><span>Mode</span>
+        <select id="mode"><option value="cash">Cash</option><option value="tournament">Tournament</option></select></label>
+      <label><span>Starting stack (bb)</span><input id="starting_stack_bb" type="number" min="1"></label>
+      <label><span>Small / big blind</span>
+        <span class="row" style="flex:0; gap:6px"><input id="sb" type="number" min="0" style="width:62px"><input id="bb" type="number" min="1" style="width:62px"></span></label>
+      <label><span>Ante</span><input id="ante" type="number" min="0"></label>
+      <label class="cash-only"><span>Stack policy</span>
+        <select id="stack_policy"><option value="reset_each_hand">Reset each hand</option><option value="rebuy_when_busted">Rebuy when busted</option><option value="top_up_to_start">Top up to start</option></select></label>
+      <label class="cash-only"><span>Duplicate mode</span><input id="duplicate_mode" type="checkbox"></label>
+      <label class="tourney-only hidden"><span>Hands per blind level</span><input id="hands_per_level" type="number" min="1" value="40"></label>
+    </section>
+
+    <section class="panel">
+      <h2>Tables</h2>
+      <label><span id="hands_label">Hands per table</span><input id="hands_per_table" type="number" min="1"></label>
+      <label><span>Rounds</span><input id="rounds" type="number" min="1"></label>
+      <label><span>Players per table</span><input id="seats_per_table" type="number" min="2" max="10" placeholder="= max seats"></label>
+      <label><span>Min tables per round</span><input id="min_tables" type="number" min="0"></label>
+      <label><span>Min appearances per bot</span><input id="min_appearances" type="number" min="1"></label>
+      <label><span>Same bot twice at a table</span><input id="allow_dup" type="checkbox"></label>
+      <label><span>Balance pairings</span><input id="balance_pairs" type="checkbox"></label>
+    </section>
+
+    <section class="panel">
+      <h2>Run</h2>
+      <label><span>Seed</span><input id="seed" type="number" min="0"></label>
+      <label><span>Threads</span><input id="threads" type="number" min="1" placeholder="all cores"></label>
+      <label><span>Elo score</span>
+        <select id="score_mode"><option value="binary">Binary</option><option value="margin">Margin (tanh)</option></select></label>
+      <label><span>Elo K-factor</span><input id="k" type="number" min="1" step="any"></label>
+      <label><span>Record decision time</span><input id="record_timing" type="checkbox"></label>
+      <label><span>Save results &amp; leaderboard</span><input id="save" type="checkbox"></label>
+      <p class="note">Saving writes <code>results/&lt;run_id&gt;/</code> and updates <code>leaderboard.json</code> in the directory where <code>arena ui</code> was started, and continues from stored ratings.</p>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between; margin-bottom:8px">
+      <h2 style="margin:0">Players (<span id="nbots">0</span> bots)</h2>
+      <div class="row"><button type="button" id="add">+ Add bot</button><button type="button" id="reset">Demo lineup</button></div>
+    </div>
+    <div class="scroll">
+    <table class="bots">
+      <thead><tr><th style="width:24%">Name</th><th style="width:20%">Kind</th><th>Params (JSON)</th><th style="width:40px"></th></tr></thead>
+      <tbody id="bots"></tbody>
+    </table>
+    </div>
+  </section>
+  </form>
+
+  <section class="panel">
+    <div class="row" style="justify-content:space-between">
+      <div class="plan" id="plan">…</div>
+      <button class="primary" id="run" type="button">Run</button>
+    </div>
+    <div id="progress" class="hidden">
+      <div class="bar"><div id="fill"></div></div>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="err" id="error"></div>
+  </section>
+
+  <section class="panel hidden" id="results">
+    <h2>Leaderboard</h2>
+    <div class="stats" id="summary" style="margin-bottom:10px"></div>
+    <div class="scroll"><table id="lb"><thead></thead><tbody></tbody></table></div>
+    <p class="note" id="saved"></p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let defaults = null, kinds = [], paramHints = {}, base = null, polling = null;
+
+const fmt = (n) => Math.round(n).toLocaleString('en-US');
+const fmtRate = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : Math.round(n);
+const fmtTime = (s) => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m + ':' + String(s % 60).padStart(2, '0'); };
+const intOrNull = (v) => v === '' ? null : parseInt(v, 10);
+
+function addBot(b) {
+  const tr = document.createElement('tr');
+  const opts = kinds.map(k => `<option value="${k}">${k}</option>`).join('');
+  tr.innerHTML = `<td><input class="name"></td><td><select class="kind">${opts}</select></td>
+    <td class="params"><input class="pj"></td><td><button type="button" class="x" title="Remove">×</button></td>`;
+  tr.querySelector('.name').value = b.name;
+  tr.querySelector('.kind').value = b.kind;
+  tr.querySelector('.pj').value = JSON.stringify(b.params && Object.keys(b.params).length ? b.params : {});
+  tr.querySelector('.kind').addEventListener('change', (e) => {
+    tr.querySelector('.pj').value = JSON.stringify(paramHints[e.target.value] || {});
+    changed();
+  });
+  tr.querySelector('.x').addEventListener('click', () => { tr.remove(); changed(); });
+  $('bots').appendChild(tr);
+}
+
+function setBots(list) { $('bots').innerHTML = ''; list.forEach(addBot); }
+
+function load(cfg) {
+  base = JSON.parse(JSON.stringify(cfg));
+  const t = cfg.table, m = cfg.matchmaking, r = cfg.rating, f = cfg.format;
+  $('variant').value = f.variant; $('max_seats').value = f.max_seats;
+  $('mode').value = t.mode; $('starting_stack_bb').value = t.starting_stack_bb;
+  const bl = t.blinds || (t.levels && t.levels[0]) || { sb: 1, bb: 2, ante: 0 };
+  $('sb').value = bl.sb; $('bb').value = bl.bb; $('ante').value = bl.ante || 0;
+  $('stack_policy').value = t.stack_policy; $('duplicate_mode').checked = t.duplicate_mode;
+  $('hands_per_table').value = t.hands_per_table; $('rounds').value = cfg.run.rounds;
+  $('seats_per_table').value = m.seats_per_table ?? ''; $('min_tables').value = m.min_tables;
+  $('min_appearances').value = m.min_appearances; $('allow_dup').checked = m.allow_duplicate_bot_at_table;
+  $('balance_pairs').checked = m.balance_pairs; $('seed').value = cfg.run.seed;
+  $('threads').value = cfg.run.threads ?? ''; $('score_mode').value = r.score_mode; $('k').value = r.k;
+  $('record_timing').checked = t.record_timing;
+  setBots(cfg.bots);
+}
+
+function levels(sb, bb, ante, hands) {
+  return [1, 2, 3, 5, 10, 20, 40, 80, 150, 300, 600].map(m => ({ sb: sb * m, bb: bb * m, ante: ante * m, hands }));
+}
+
+function readBots() {
+  const out = []; let ok = true;
+  for (const tr of $('bots').children) {
+    const pj = tr.querySelector('.pj');
+    let params = {};
+    try { params = pj.value.trim() ? JSON.parse(pj.value) : {}; pj.classList.remove('bad'); }
+    catch { pj.classList.add('bad'); ok = false; }
+    out.push({ name: tr.querySelector('.name').value.trim(), kind: tr.querySelector('.kind').value, params });
+  }
+  $('nbots').textContent = out.length;
+  return ok ? out : null;
+}
+
+function buildConfig() {
+  const bots = readBots();
+  if (!bots) throw new Error('fix the highlighted params (must be JSON objects)');
+  const cfg = JSON.parse(JSON.stringify(base));
+  const mode = $('mode').value, sb = +$('sb').value, bb = +$('bb').value, ante = +$('ante').value;
+  cfg.format = { variant: $('variant').value, max_seats: +$('max_seats').value };
+  Object.assign(cfg.table, {
+    hands_per_table: +$('hands_per_table').value, starting_stack_bb: +$('starting_stack_bb').value,
+    mode, stack_policy: $('stack_policy').value, record_timing: $('record_timing').checked,
+    duplicate_mode: mode === 'cash' && $('duplicate_mode').checked,
+  });
+  if (mode === 'cash') { cfg.table.blinds = { sb, bb, ante }; cfg.table.levels = []; }
+  else { cfg.table.blinds = null; cfg.table.levels = levels(sb, bb, ante, +$('hands_per_level').value || 40); }
+  Object.assign(cfg.matchmaking, {
+    seats_per_table: intOrNull($('seats_per_table').value), min_tables: +$('min_tables').value || 0,
+    min_appearances: +$('min_appearances').value, allow_duplicate_bot_at_table: $('allow_dup').checked,
+    balance_pairs: $('balance_pairs').checked,
+  });
+  Object.assign(cfg.rating, { score_mode: $('score_mode').value, k: +$('k').value });
+  Object.assign(cfg.run, { rounds: +$('rounds').value, seed: +$('seed').value || 0, threads: intOrNull($('threads').value) });
+  cfg.bots = bots;
+  return cfg;
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+let planTimer = null;
+function changed() {
+  const t = $('mode').value === 'tournament';
+  document.querySelectorAll('.cash-only').forEach(e => e.classList.toggle('hidden', t));
+  document.querySelectorAll('.tourney-only').forEach(e => e.classList.toggle('hidden', !t));
+  $('hands_label').textContent = t ? 'Max hands per table' : 'Hands per table';
+  clearTimeout(planTimer);
+  planTimer = setTimeout(updatePlan, 200);
+}
+
+async function updatePlan() {
+  try {
+    const p = await api('/api/plan', { config: buildConfig() });
+    $('plan').innerHTML = `<b>${p.bots}</b> bots · <b>${p.seats_per_table}</b> players/table · <b>${p.tables_per_round}</b> tables/round · ` +
+      `<b>${fmt(p.total_tables)}</b> tables · ${p.tournament ? 'up to ' : ''}<b>${fmt(p.total_hands)}</b> hands`;
+    $('run').disabled = !!polling;
+  } catch (e) {
+    $('plan').innerHTML = `<span class="err">${escapeHtml(e.message)}</span>`;
+    $('run').disabled = true;
+  }
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function setRunning(on) {
+  $('run').disabled = on; $('run').textContent = on ? 'Running…' : 'Run';
+  document.querySelectorAll('#form input, #form select, #form button').forEach(e => e.disabled = on);
+}
+
+async function run() {
+  $('error').textContent = '';
+  try {
+    await api('/api/run', { config: buildConfig(), save: $('save').checked });
+    $('results').classList.add('hidden');
+    startPolling();
+  } catch (e) { $('error').textContent = e.message; }
+}
+
+function startPolling() {
+  setRunning(true);
+  $('progress').classList.remove('hidden');
+  if (polling) clearInterval(polling);
+  polling = setInterval(poll, 250);
+  poll();
+}
+
+async function poll() {
+  let s;
+  try { s = await api('/api/status'); } catch { return; }
+  if (s.state === 'idle') { stopPolling(); return; }
+  const tour = s.result ? s.result.tournament : false;
+  const frac = s.state === 'done' ? 1 : (tour || !s.hands_total)
+    ? (s.tables_total ? s.tables_done / s.tables_total : 0)
+    : Math.min(1, s.hands_done / s.hands_total);
+  $('fill').style.width = (frac * 100).toFixed(1) + '%';
+  const eta = frac > 0 && frac < 1 ? ` · ETA ${fmtTime(s.elapsed * (1 - frac) / frac)}` : '';
+  $('stats').textContent = `${(frac * 100).toFixed(1)}% · round ${Math.min(s.rounds_done + (s.state === 'running' ? 1 : 0), s.rounds_total)}/${s.rounds_total} · ` +
+    `${fmt(s.tables_done)}/${fmt(s.tables_total)} tables · ${fmt(s.hands_done)} hands · ` +
+    `${fmtRate(s.hands_per_sec)} hands/s · ${fmtTime(s.elapsed)} elapsed${eta}`;
+  if (s.state === 'done') { stopPolling(); showResult(s.result); }
+  if (s.state === 'error') { stopPolling(); $('error').textContent = s.error; }
+}
+
+function stopPolling() { clearInterval(polling); polling = null; setRunning(false); updatePlan(); }
+
+function showResult(r) {
+  $('results').classList.remove('hidden');
+  $('summary').textContent = `${fmt(r.hands)} hands on ${fmt(r.tables)} tables in ${r.elapsed.toFixed(2)} s (${fmtRate(r.hands_per_sec)} hands/s)`;
+  const tour = r.rows.some(x => x.avg_place !== null && x.avg_place !== undefined);
+  const cols = ['#', 'Bot', 'Elo', 'ΔElo', 'Hands', 'bb/100', '±95% CI', 'VPIP', 'PFR', 'Showdown', 'Illegal', 'µs/decision'].concat(tour ? ['Avg place'] : []);
+  const num = (i) => i >= 2;
+  $('lb').querySelector('thead').innerHTML = '<tr>' + cols.map((c, i) => `<th class="${num(i) ? 'num' : ''}">${c}</th>`).join('') + '</tr>';
+  const pct = (x) => (100 * x).toFixed(1) + '%';
+  const sign = (x, d) => `<span class="${x > 0 ? 'pos' : x < 0 ? 'neg' : ''}">${x > 0 ? '+' : ''}${x.toFixed(d)}</span>`;
+  $('lb').querySelector('tbody').innerHTML = r.rows.map((x, i) => '<tr>' + [
+    i + 1, escapeHtml(x.key), x.rating.toFixed(1), sign(x.rating_change, 1), fmt(x.hands),
+    sign(x.bb_per_100, 1), x.ci95 == null ? '–' : '±' + x.ci95.toFixed(1), pct(x.vpip), pct(x.pfr),
+    pct(x.showdown), x.illegal, x.mean_decision_us.toFixed(2),
+  ].concat(tour ? [x.avg_place.toFixed(2)] : []).map((v, j) => `<td class="${num(j) ? 'num' : ''}">${v}</td>`).join('') + '</tr>').join('');
+  $('saved').innerHTML = r.results_dir ? `Saved to <code>${escapeHtml(r.results_dir)}</code>; leaderboard <code>${escapeHtml(r.leaderboard)}</code>.` : 'Not saved (enable "Save results & leaderboard" to keep runs and ratings).';
+}
+
+async function init() {
+  defaults = await api('/api/defaults');
+  kinds = defaults.bot_kinds; paramHints = defaults.bot_params;
+  load(defaults.config);
+  $('form').addEventListener('input', changed);
+  $('form').addEventListener('change', changed);
+  $('add').addEventListener('click', () => {
+    const n = $('bots').children.length + 1;
+    addBot({ name: 'bot' + n, kind: 'random', params: paramHints.random }); changed();
+  });
+  $('reset').addEventListener('click', () => { setBots(defaults.config.bots); changed(); });
+  $('run').addEventListener('click', run);
+  changed();
+  const s = await api('/api/status');
+  if (s.state === 'running') startPolling();
+  else if (s.state === 'done') { $('progress').classList.remove('hidden'); poll(); }
+}
+init().catch(e => { $('error').textContent = 'Failed to load: ' + e.message; });
+</script>
+</body>
+</html>
