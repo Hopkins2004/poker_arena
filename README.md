@@ -171,6 +171,74 @@ https://github.com/a-hanamoto/leakproof-preflop-ranges), licensed
 with the strategy itself unchanged. [ranges/README.md](ranges/README.md) covers the tree, the
 API and the file format.
 
+## River value network (`river_net/`)
+
+A DeepStack-style river value network, plus the exact solver that produces its targets.
+Results: [results/river_net_poc.md](results/river_net_poc.md). One command per step, from the
+repository root (`python/.venv/bin/python`; needs `pip install torch matplotlib`):
+
+```
+python -m river_net.datagen --n 100000 --workers 12 --out data/v1 --seed 0   # ~8 min, ~3.2 GB
+python -m river_net.train --data data/v1 --K 64 --hidden 512 --epochs 100 --out runs/k64 --save-model river_net/models/river_k64.pt   # ~90 s
+python -m river_net.evaluate --data data/v1 --model river_net/models/river_k64.pt --curves   # writes results/river_net_poc.md
+python -m river_net.diagnostics --n 1000                                       # range-generator checks
+```
+
+The data is deterministic in `(seed, config)`. `datagen` resumes or extends an existing
+directory, and refuses a directory written with another config.
+
+**Exact solver** (`crates/solver`, Rust, called through `river_net.solver.solve`)
+- Vectorized public-tree DCFR (α, β, γ) = (1.5, 0, 2) with alternating updates, over all 1326
+  combos, with O(n) fold and showdown terminals.
+- Default bets {½ pot, pot, all-in}, raises {pot, all-in}, at most 3 bets/raises; a size that
+  leaves less than ⅓ of the stack behind becomes all-in.
+- Exploitability is checked every 50 iterations. Solving stops below 0.2% of the pot or at 500
+  iterations.
+
+**Value convention** (the turn solver depends on it)
+- **Spot.** `(board[5], pot P, effective stack S, r1[1326], r2[1326])`. Player 1 is out of
+  position and acts first.
+- **Combos.** The 1326 combos are indexed `hi*(hi-1)/2 + lo`, cards `rank*4 + suit` (as in
+  `pokerarena.preflop.COMBOS`).
+- **Ranges.** Nonnegative, zero on blocked combos, normalized to 1.
+- **Units.** All values are in units of the starting river pot `P`.
+- **Payoff.** For a deal ending at a terminal,
+  `u1 = (chips player 1 collects from the final pot − chips player 1 put in on the river)/P − ½`
+  and `u2 = −u1`.
+  - A fold by f gives `u_f = −½ − c_f`, and the other player gets `½ + c_f`. Here `c` is the
+    river contribution in pot units.
+  - A showdown with contributions c gives `±(½ + c)`, and 0 on a tie.
+- **Masses and values.**
+  - `c(h,h') = 1` iff the combos share no card.
+  - `m_i(h) = Σ c(h,h') r_{−i}(h')` is the compatible opponent mass.
+  - `v_i(h) = (1/m_i(h)) Σ c(h,h') r_{−i}(h') E_σ̄[u_i | h,h']` is the conditional value under
+    the solver's average strategy σ̄. It is defined for every valid hand, including hands
+    outside the range, and is 0 on blocked combos.
+  - `ṽ_i = m_i v_i` is the counterfactual value.
+- **Zero-sum identity.** `Σ r1 ṽ1 + Σ r2 ṽ2 = 0`.
+
+**Training spots** (`river_net/ranges.py`)
+- **A (70%).** A preflop chart scenario, then flop and turn action lines applied as soft
+  equity-percentile filters.
+- **B (20%).** DeepStack-style recursive mass splits over strength-sorted hands.
+- **C (10%).** Chart ranges times Dirichlet noise.
+
+**Network.**
+- **Bucketing.** Hands are bucketed per board into K strength buckets of roughly equal size;
+  tie groups are never split.
+- **Inputs.** The bucket masses of both ranges, SPR and `log(1+SPR)`.
+- **Model.** An MLP with GELU and LayerNorm. The shipped model is 3 × 512; the code
+  default is 3 × 64, which is about 30% less accurate.
+- **Output.** K values per player, followed by a zero-sum projection.
+- **Leaf-evaluator interface:**
+
+```python
+from river_net.model import RiverValueNet
+net = RiverValueNet.load("river_net/models/river_k64.pt")
+v1, v2 = net.predict(board, pot, stack, r1, r2)      # 1326 conditional values each
+V1, V2 = net.predict_batch(boards, sprs, R1, R2)      # batched, [B, 1326]
+```
+
 ## Config format
 
 ```toml
