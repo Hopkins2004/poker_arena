@@ -1,0 +1,10 @@
+/target
+**/target
+.venv/
+__pycache__/
+*.pyc
+*.so
+*.dylib
+/results/
+/leaderboard.json
+.pytest_cache/

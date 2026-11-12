@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+debug = 1

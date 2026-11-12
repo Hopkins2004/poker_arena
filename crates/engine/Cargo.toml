@@ -1,0 +1,22 @@
+[package]
+name = "engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Poker rules engine: cards, hand evaluation, betting state machine."
+
+[dependencies]
+rand_core = "0.10"
+
+[dev-dependencies]
+criterion = "0.8.2"
+proptest = "1.12.0"
+rand_xoshiro = "0.8.1"
+
+[[bench]]
+name = "eval"
+harness = false
+
+[[bench]]
+name = "hands"
+harness = false
