@@ -196,7 +196,9 @@ class RangeSolver(RangeTag):
         self.stats["solves"] += 1
         return res, float(pot0), players, me
 
-    def _river_ranges(self, obs, players, board):
+    def _river_ranges(self, obs, players, board, streets=((1, 3), (2, 4))):
+        """Both players' ranges: chart preflop, then the actions of ``streets``
+        ((street, board cards used for equity), ...) applied as soft filters."""
         w169 = preflop_ranges(obs)
         r = {}
         for s in players:
@@ -205,7 +207,7 @@ class RangeSolver(RangeTag):
                 w = np.ones(169)
             r[s] = preflop.expand(w, dead=board)
         a, b = players
-        for street, nb in ((1, 3), (2, 4)):
+        for street, nb in streets:
             facing = False
             for seat, st, kind, _amount, _to, _ai in obs.history:
                 if st != street or seat not in r or kind in ("ante", "sb", "bb"):
