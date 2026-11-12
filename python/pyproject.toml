@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pokerarena"
+version = "0.1.0"
+description = "Python bindings for the poker bot arena"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+module-name = "pokerarena._native"
+python-source = "."
+python-packages = ["pokerarena"]
+include = [{ path = "pokerarena/py.typed", format = "sdist" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
