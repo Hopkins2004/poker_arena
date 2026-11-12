@@ -48,7 +48,7 @@ def test_default_lineup_is_the_anchored_bots(app):
 def test_add_bot_button_adds_from_the_bots_folder(app):
     w = ArenaWindow()
     choices = [w.catalog_box.itemData(i) for i in range(w.catalog_box.count())]
-    assert choices == [b.kind for b in w.catalog] and len(choices) == 3
+    assert choices == [b.kind for b in w.catalog] and len(choices) >= 3
     w.catalog_box.setCurrentIndex(choices.index("python:bots.NLH.tag.TightAggressive"))
     w.add_btn.click()
     w.add_btn.click()

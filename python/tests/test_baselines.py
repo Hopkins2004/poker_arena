@@ -8,13 +8,14 @@ from bots.NLH.tag import chen_score
 
 
 def test_catalog_finds_the_anchored_bots():
-    bots = {b.name: b for b in pa.discover()}
-    assert set(bots) == {"random", "station", "tag"}
+    found = pa.discover()
+    bots = {b.name: b for b in found if b.anchor is not None}
+    assert set(bots) == {"random", "station", "tag"}  # other bots in the folder are unanchored
     assert (bots["random"].anchor, bots["station"].anchor, bots["tag"].anchor) == (850, 400, 1300)
     assert bots["tag"].kind == "python:bots.NLH.tag.TightAggressive"
     assert all(b.label and b.path.endswith(".py") for b in bots.values())
     assert pa.catalog.anchored_lineup() == [
-        {"name": b.name, "kind": b.kind, "anchor": b.anchor} for b in pa.discover()]
+        {"name": b.name, "kind": b.kind, "anchor": b.anchor} for b in found if b.anchor is not None]
 
 
 def test_parameters_are_hardcoded():

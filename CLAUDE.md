@@ -18,13 +18,15 @@ crates/
   engine/    # cards, deck, hand evaluator, equity, state machine; rules/ = one file per format and per betting structure. No I/O, no threads.
   arena/     # bot trait, table runner, matchmaking, ratings (with anchors), stats, replays, config, parallel scheduler
   cli/       # `arena` binary: bench, leaderboard
+  solver/    # exact river solver: vectorized public-tree DCFR over 1326 combos, range equity (engine only)
 python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` (baselines, runner, desktop GUI) + example bots
 bots/NLH/    # bots, one file each (anchored baselines)
+river_net/   # river value network PoC: solver wrapper, range generator, datagen, model (Python, uses _native.solver_*)
 ranges/      # preflop range database (6-max 100bb, CC BY 4.0 source vendored) + converter; read via pokerarena.preflop
 configs/     # example TOML configs
 ```
 
-Dependency direction: `engine` ← `arena` ← `cli`, `python`. `engine` must not depend on anything heavier than `rand` core traits.
+Dependency direction: `engine` ← `arena` ← `cli`, `python`; `engine` ← `solver` ← `python`. `engine` must not depend on anything heavier than `rand` core traits.
 
 ## Core design rules
 
@@ -90,6 +92,8 @@ cargo bench -p engine                                # evaluator + hand-throughp
 cargo run --release -p cli -- bench                 # runs with bots: Poker Arena.app or pokerarena.run
 cargo clippy --workspace -- -D warnings && cargo fmt --check
 cd python && maturin develop --release && pytest
+python/.venv/bin/python -m pytest river_net/tests     # from the repo root
+cargo run --release -p solver --example bench_solve   # river solve times
 ```
 
 Always benchmark in `--release`. Set `RUSTFLAGS="-C target-cpu=native"` for local benchmarking only, never in committed build config.

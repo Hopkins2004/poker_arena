@@ -28,6 +28,8 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
+
+mod solver;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1039,6 +1041,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_cards, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(hand_category, m)?)?;
+    solver::register(m)?;
     m.add(
         "STREETS",
         PyTuple::new(m.py(), ["preflop", "flop", "turn", "river"])?,

@@ -5,9 +5,15 @@ __pycache__/
 *.pyc
 *.so
 *.dylib
-/results/
+/results/*
 /leaderboard*.json
 .pytest_cache/
 /.poker_arena.log
 .DS_Store
 /hand_replays/
+
+# river_net: generated data and training runs; the PoC report is kept
+/data/
+/runs/
+!/results/river_net_poc.md
+!/results/river_net_poc/

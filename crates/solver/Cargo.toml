@@ -1,0 +1,13 @@
+[package]
+name = "solver"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Exact river solver (vectorized public-tree DCFR over 1326 combos) and range equity."
+
+[dependencies]
+engine = { path = "../engine" }
+rand_xoshiro = "0.8"
+
+[dev-dependencies]
+rand_xoshiro = "0.8"
