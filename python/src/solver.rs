@@ -323,6 +323,117 @@ pub fn solver_river_equity<'py>(
     Ok((PyArray1::from_vec(py, eq), PyArray1::from_vec(py, mass)))
 }
 
+/// The 48 river boards of a turn board, with cached hand sets: per-card opponent masses and
+/// showdown sums for turn solving (`river_net.turn`). Vectors are 1326-combo f32 arrays.
+#[pyclass(module = "pokerarena._native", name = "TurnBoards")]
+pub struct TurnBoards {
+    cards: Vec<u8>,
+    rivers: Vec<solver::RiverHands>,
+}
+
+#[pymethods]
+impl TurnBoards {
+    #[new]
+    fn new(py: Python<'_>, board: Vec<u8>) -> PyResult<Self> {
+        if board.len() != 4 {
+            return Err(verr("a turn board has 4 cards"));
+        }
+        let mut seen = 0u64;
+        for &c in &board {
+            if c >= 52 || seen & (1 << c) != 0 {
+                return Err(verr("board cards must be distinct cards 0..52"));
+            }
+            seen |= 1 << c;
+        }
+        let cards: Vec<u8> = (0..52u8).filter(|&c| seen & (1 << c) == 0).collect();
+        let rivers = py.detach(|| {
+            cards
+                .iter()
+                .map(|&c| {
+                    let b = [board[0], board[1], board[2], board[3], c].map(engine::Card);
+                    solver::RiverHands::new(&b)
+                })
+                .collect()
+        });
+        Ok(TurnBoards { cards, rivers })
+    }
+
+    /// River cards, in the order used by every per-card output.
+    #[getter]
+    fn cards(&self) -> Vec<u8> {
+        self.cards.clone()
+    }
+
+    /// Strength of every combo on each river board, flat `[cards, 1326]` (0 = blocked).
+    fn strengths<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u16>> {
+        let flat: Vec<u16> = self
+            .rivers
+            .iter()
+            .flat_map(|r| r.strength_1326.iter().copied())
+            .collect();
+        PyArray1::from_vec(py, flat)
+    }
+
+    /// Compatible mass of opponent reach `q[l]` for every combo on every river card:
+    /// flat `[L, cards, 1326]` (0 for combos blocked by the river board). `q` is `[L*1326]`.
+    fn masses<'py>(
+        &self,
+        py: Python<'py>,
+        q: PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let q = q.as_slice().map_err(verr)?;
+        if q.len() % N_COMBOS != 0 {
+            return Err(verr("q must be [L * 1326]"));
+        }
+        let l = q.len() / N_COMBOS;
+        let nc = self.cards.len();
+        let out = py.detach(|| {
+            let mut out = vec![0f32; l * nc * N_COMBOS];
+            let mut sc = solver::terminal::TermScratch::default();
+            for li in 0..l {
+                let ql = &q[li * N_COMBOS..(li + 1) * N_COMBOS];
+                for (ci, rh) in self.rivers.iter().enumerate() {
+                    let g = rh.gather(ql);
+                    let mut m = vec![0f32; g.len()];
+                    rh.set.index.prepare(&g, &mut sc);
+                    rh.set.index.compat(&g, &sc, &mut m);
+                    let base = (li * nc + ci) * N_COMBOS;
+                    for (&c, &x) in rh.combo.iter().zip(&m) {
+                        out[base + c as usize] = x;
+                    }
+                }
+            }
+            out
+        });
+        Ok(PyArray1::from_vec(py, out))
+    }
+
+    /// Showdown net (weaker − stronger compatible mass of `q`) summed over the river cards,
+    /// for every combo: all-in leaves average this over the 44 cards each deal can see.
+    fn showdown_net_sum<'py>(
+        &self,
+        py: Python<'py>,
+        q: PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let q = slice(&q, N_COMBOS, "q")?;
+        let out = py.detach(|| {
+            let mut acc = vec![0f64; N_COMBOS];
+            let mut sc = solver::terminal::TermScratch::default();
+            for rh in &self.rivers {
+                let g = rh.gather(q);
+                let mut net = vec![0f32; g.len()];
+                rh.set.index.prepare(&g, &mut sc);
+                rh.set.index.net(&sc, &mut net);
+                for (&c, &x) in rh.combo.iter().zip(&net) {
+                    acc[c as usize] += x as f64;
+                }
+            }
+            acc.into_iter().map(|x| x as f32).collect::<Vec<f32>>()
+        });
+        Ok(PyArray1::from_vec(py, out))
+    }
+}
+
 /// Registers the solver functions on `_native`.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_build_tree, m)?)?;
@@ -331,5 +442,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_abstract_solve, m)?)?;
     m.add_function(wrap_pyfunction!(solver_range_equity, m)?)?;
     m.add_function(wrap_pyfunction!(solver_river_equity, m)?)?;
+    m.add_class::<TurnBoards>()?;
     Ok(())
 }

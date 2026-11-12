@@ -239,6 +239,32 @@ v1, v2 = net.predict(board, pot, stack, r1, r2)      # 1326 conditional values e
 V1, V2 = net.predict_batch(boards, sprs, R1, R2)      # batched, [B, 1326]
 ```
 
+### Turn solver (`river_net/turn.py`)
+
+The turn solver uses the same tree, conventions and DCFR as the river solver, one street
+earlier, with river leaves valued by the network:
+
+```python
+from river_net.turn import TurnSolver, NetworkLeaf
+from river_net.model import RiverValueNet
+spot = RangeGenerator(0).generate(0, street="turn")       # 4-card board, flop line only
+res = TurnSolver(spot, NetworkLeaf(RiverValueNet.load("river_net/models/river_k64.pt"))).solve(iters=300)
+```
+
+**Terminals.**
+- **Fold:** as on the river.
+- **All-in:** an exact showdown averaged over the river cards.
+- **River leaf:** for every river card, one network query on the leaf's card-conditioned
+  ranges. The leaf value is `cfv(h) = (1+2c)/44 · Σ_card m_card(h) · v_card(h)`, because a
+  river pot is `1+2c` turn pots.
+
+**Updates.** Updates are simultaneous, so each iteration needs one batched forward pass over
+all leaves × 48 cards.
+
+**Measuring it.** `python -m river_net.turn_check --spots 20` re-solves every leaf exactly with
+the induced ranges. It reports the network's error on those ranges, and the turn strategy's
+exploitability with exact river play, against check-down leaves.
+
 ## Config format
 
 ```toml

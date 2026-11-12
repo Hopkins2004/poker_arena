@@ -218,6 +218,7 @@ class RangeGenerator:
 
     def __init__(self, seed: int = 0, config: GeneratorConfig | None = None):
         self.seed = int(seed)
+        self._nb = 5  # board cards of the spot being generated (5 river, 4 turn)
         self.config = config or GeneratorConfig()
         self.scenarios = scenario_table()
         w = np.array([s.prob for s in self.scenarios])
@@ -234,9 +235,15 @@ class RangeGenerator:
 
     # -- public ------------------------------------------------------------------------
 
-    def generate(self, index: int, source: str | None = None) -> Spot:
-        """Spot number ``index`` (optionally forcing a source)."""
-        rng = np.random.default_rng([self.seed, int(index)])
+    def generate(self, index: int, source: str | None = None, street: str = "river") -> Spot:
+        """Spot number ``index`` (optionally forcing a source). ``street="turn"`` cuts the
+        same process one street earlier: 4-card board, only the flop line played (source B
+        then splits mass over turn equity vs a uniform range instead of river strength)."""
+        if street not in ("river", "turn"):
+            raise ValueError(f"street must be 'river' or 'turn', got {street!r}")
+        self._nb = 5 if street == "river" else 4
+        seed = [self.seed, int(index)] if street == "river" else [self.seed, int(index), 4]
+        rng = np.random.default_rng(seed)
         src = source or SOURCES[int(rng.choice(3, p=self.source_p))]
         for _ in range(self.config.max_attempts):
             spot = {"A": self._source_a, "B": self._source_b, "C": self._source_c}[src](rng)
@@ -285,7 +292,7 @@ class RangeGenerator:
     def _money_path(self, rng, sc):
         pot, stack = sc.pot_bb, sc.stack_bb
         lines = []
-        for _ in range(2):
+        for _ in range(self._nb - 3):
             line, f = self._sample_line(rng, pot, stack)
             pot, stack = self._money(line, f, pot, stack)
             lines.append(line if line == "cc" else f"{line}{f:g}")
@@ -298,7 +305,7 @@ class RangeGenerator:
              expand(jitter_classes(sc.r_ip, rng), board[:3])]
         pot, stack = sc.pot_bb, sc.stack_bb
         lines = []
-        for street, nb in ((1, 3), (2, 4)):
+        for street, nb in ((1, 3), (2, 4))[: self._nb - 3]:
             vis = board[:nb]
             if nb == 4:  # the turn card is now dead
                 turn_dead = (HAND_CARDS == board[3]).any(axis=1)
@@ -309,7 +316,7 @@ class RangeGenerator:
                 return None
             pot, stack = self._money(line, f, pot, stack)
             lines.append(line if line == "cc" else f"{line}{f:g}")
-        return self._finish(board, pot, stack, r[0], r[1],
+        return self._finish(board[: self._nb], pot, stack, r[0], r[1],
                             {"source": "A", "scenario": sc.line, "pot_type": sc.pot_type,
                              "line": "/".join(lines)})
 
@@ -346,8 +353,13 @@ class RangeGenerator:
     def _source_b(self, rng) -> Spot | None:
         sc = self._scenario(rng)
         pot, stack, line = self._money_path(rng, sc)
-        board = rng.choice(52, size=5, replace=False).astype(np.uint8)
-        strength = _native.solver_river_strengths(board.tolist()).astype(np.int64)
+        board = rng.choice(52, size=5, replace=False).astype(np.uint8)[: self._nb]
+        if self._nb == 5:
+            strength = _native.solver_river_strengths(board.tolist()).astype(np.int64)
+        else:  # turn: order by equity against a uniform range (exact over rivers)
+            uni = (~np.isin(HAND_CARDS, board).any(axis=1)).astype(np.float32)
+            eq = _native.solver_range_equity(board.tolist(), uni / uni.sum(), 1, 0)
+            strength = np.where(uni > 0, 1 + np.round(eq * 1e6), 0).astype(np.int64)
         valid = np.flatnonzero(strength > 0)
         r = [recursive_split(strength, valid, rng) for _ in range(2)]
         return self._finish(board, pot, stack, r[0], r[1],
@@ -357,7 +369,7 @@ class RangeGenerator:
     def _source_c(self, rng) -> Spot | None:
         sc = self._scenario(rng)
         pot, stack, line = self._money_path(rng, sc)
-        board = rng.choice(52, size=5, replace=False).astype(np.uint8)
+        board = rng.choice(52, size=5, replace=False).astype(np.uint8)[: self._nb]
         alpha = rng.uniform(0.5, 2.0)
         r = [expand(w, board) * rng.gamma(alpha, size=N_COMBOS) for w in (sc.r_oop, sc.r_ip)]
         return self._finish(board, pot, stack, r[0], r[1],
