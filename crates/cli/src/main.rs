@@ -36,6 +36,9 @@ enum Cmd {
         /// Override the number of rounds.
         #[arg(long)]
         rounds: Option<usize>,
+        /// Override hands per table.
+        #[arg(long)]
+        hands: Option<u64>,
         /// Ignore stored ratings and start every bot from the initial rating.
         #[arg(long)]
         fresh: bool,
@@ -89,6 +92,7 @@ fn main() -> ExitCode {
             seed,
             threads,
             rounds,
+            hands,
             fresh,
             quiet,
             leaderboard,
@@ -98,6 +102,7 @@ fn main() -> ExitCode {
             seed,
             threads,
             rounds,
+            hands,
             fresh,
             quiet,
             leaderboard,
@@ -126,6 +131,7 @@ struct RunArgs {
     seed: Option<u64>,
     threads: Option<usize>,
     rounds: Option<usize>,
+    hands: Option<u64>,
     fresh: bool,
     quiet: bool,
     leaderboard: Option<PathBuf>,
@@ -148,6 +154,10 @@ fn cmd_run(a: RunArgs) -> Result<(), String> {
     if let Some(r) = a.rounds {
         cfg.run.rounds = r;
         overrides.push(format!("rounds = {r}"));
+    }
+    if let Some(h) = a.hands {
+        cfg.table.hands_per_table = h;
+        overrides.push(format!("hands_per_table = {h}"));
     }
     let spec = cfg.run_spec()?;
 

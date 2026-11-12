@@ -130,7 +130,7 @@ pub struct RunState {
     elo: PairwiseElo,
     initial: Vec<f64>,
     stats: Vec<SeatStats>,
-    /// Per (table, seat) bb/100 samples per bot, for confidence intervals.
+    /// Per (table, bot) pooled bb/100 samples, for confidence intervals.
     samples: Vec<Vec<f64>>,
     places: Vec<Vec<u32>>,
     rounds_applied: usize,
@@ -209,14 +209,31 @@ impl RunState {
     pub fn apply_round(&mut self, results: &[TableResult]) {
         self.elo.begin_round();
         for r in results {
-            self.elo.add_table(&TableOutcome::from_result(r));
             for s in &r.seats {
                 self.stats[s.bot].merge(&s.stats);
-                self.samples[s.bot].push(s.stats.bb_per_100(r.bb));
                 if let Some(p) = s.place {
                     self.places[s.bot].push(p);
                 }
             }
+            // One pooled bb/100 sample per (table, bot), for the CI.
+            let mut seen: Vec<usize> = Vec::with_capacity(r.seats.len());
+            for s in &r.seats {
+                if seen.contains(&s.bot) {
+                    continue;
+                }
+                seen.push(s.bot);
+                let (net, hands) = r
+                    .seats
+                    .iter()
+                    .filter(|o| o.bot == s.bot)
+                    .fold((0i64, 0u64), |a, o| {
+                        (a.0 + o.stats.net, a.1 + o.stats.hands)
+                    });
+                if hands > 0 {
+                    self.samples[s.bot].push(net as f64 / r.bb as f64 / hands as f64 * 100.0);
+                }
+            }
+            self.elo.add_table(&TableOutcome::from_result(r));
         }
         self.elo.end_round();
         self.rounds_applied += 1;

@@ -23,11 +23,11 @@ pub struct LeaderboardRow {
     pub net_chips: i64,
     /// Hand-weighted bb/100.
     pub bb_per_100: f64,
-    /// Half-width of the 95% CI of bb/100, from the variance of per-(table, seat) bb/100
-    /// (`1.96·sd/√n`); `None` with fewer than two samples.
+    /// Half-width of the 95% CI of bb/100, from the variance of per-table bb/100 (the bot's
+    /// seats at a table pooled; `1.96·sd/√n`); `None` with fewer than two samples.
     pub ci95: Option<f64>,
-    /// Table-seat appearances.
-    pub seats: usize,
+    /// Tables played.
+    pub tables: usize,
     /// VPIP rate.
     pub vpip: f64,
     /// PFR rate.
@@ -66,7 +66,7 @@ impl LeaderboardRow {
             net_chips: st.net,
             bb_per_100: st.bb_per_100(bb),
             ci95,
-            seats: n,
+            tables: n,
             vpip: st.vpip_rate(),
             pfr: st.pfr_rate(),
             showdown: st.showdown_rate(),
@@ -139,8 +139,9 @@ pub struct StoredEntry {
     pub hands: u64,
     /// Cumulative net result in big blinds over all runs.
     pub net_bb: f64,
-    /// Cumulative rated table-seat appearances.
-    pub seats: u64,
+    /// Cumulative rated tables.
+    #[serde(alias = "seats")]
+    pub tables: u64,
     /// Number of runs.
     pub runs: u64,
     /// Run id of the last update.
@@ -187,14 +188,14 @@ impl LeaderboardFile {
                 rating: r.rating,
                 hands: 0,
                 net_bb: 0.0,
-                seats: 0,
+                tables: 0,
                 runs: 0,
                 last_run: String::new(),
             });
             e.rating = r.rating;
             e.hands += r.hands;
             e.net_bb += r.net_chips as f64 / bb as f64;
-            e.seats += r.seats as u64;
+            e.tables += r.tables as u64;
             e.runs += 1;
             e.last_run = run_id.to_string();
         }

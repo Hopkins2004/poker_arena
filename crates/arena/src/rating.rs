@@ -1,22 +1,23 @@
 //! Ratings: a [`RatingSystem`] trait and pairwise multiplayer Elo.
 //!
-//! **Pairwise Elo.** Every seat at a table is its own participant; seats are never pooled.
-//! For seat `i` (bot `a`) and every seat `j` held by a *different* bot `b` (same-bot pairs
-//! are skipped):
+//! **Pooling.** When a bot holds several seats at a table (duplicates allowed and `k < s`),
+//! its seats are pooled into one result for that table: in cash games its bb/100 over all
+//! its seats (total net / total hands), in tournaments the mean finishing place of its
+//! instances. Rating then works on the `n` distinct bots at the table.
 //!
-//! * expected score `E_ij = 1 / (1 + 10^((R_b − R_a)/400))`, using ratings frozen at the
+//! **Pairwise Elo.** For each pair of distinct bots `(i, j)` at a table:
+//!
+//! * expected score `E_ij = 1 / (1 + 10^((R_j − R_i)/400))`, using ratings frozen at the
 //!   start of the round;
 //! * actual score `S_ij`:
-//!   * cash games compare per-seat **bb/100**: `binary` gives 1, ½ or 0; `margin` gives
+//!   * cash games compare pooled **bb/100**: `binary` gives 1, ½ or 0; `margin` gives
 //!     `½ + ½·tanh((w_i − w_j)/c)`;
-//!   * tournaments compare **finishing places** (1, ½ or 0); `margin` falls back to this.
-//! * `Δ_i = K/(N−1) · Σ_j (S_ij − E_ij)` where `N` is the number of seats at the table.
+//!   * tournaments compare (mean) **finishing places** (1, ½ or 0); `margin` falls back
+//!     to this.
+//! * `Δ_i = K/(n−1) · Σ_j (S_ij − E_ij)`.
 //!
-//! A bot's round delta is the sum of `Δ_i` over all its seats at all tables in the round,
-//! applied once at round end, so the result does not depend on table order. With one seat
-//! per bot (`N = n` distinct bots) this is exactly the `K/(n−1) · Σ_j (S_ij − E_ij)` formula.
-//! Using the same divisor for every seat at a table keeps each pair's update symmetric, so
-//! the system stays zero-sum even when a bot holds several seats.
+//! Deltas are accumulated over the whole round and applied once at round end, so the result
+//! does not depend on table order. The update is symmetric per pair, hence zero-sum.
 
 use crate::table::TableResult;
 use serde::{Deserialize, Serialize};
@@ -57,38 +58,56 @@ impl Default for RatingConfig {
     }
 }
 
-/// One seat's result, as seen by the rating system.
+/// One bot's (pooled) result at a table, as seen by the rating system.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SeatOutcome {
+pub struct BotOutcome {
     /// Bot index.
     pub bot: usize,
-    /// Result where higher is better: bb/100 in cash games, `-place` in tournaments.
+    /// Result where higher is better: pooled bb/100 in cash games, `-mean place` in
+    /// tournaments.
     pub value: f64,
 }
 
-/// A table's outcome for rating purposes.
+/// A table's outcome for rating purposes: one entry per distinct bot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableOutcome {
-    /// Per-seat outcomes.
-    pub seats: Vec<SeatOutcome>,
+    /// Per-bot outcomes (distinct bots, in order of first seat).
+    pub bots: Vec<BotOutcome>,
     /// True if values are finishing places (margin scoring does not apply).
     pub placement: bool,
 }
 
 impl TableOutcome {
-    /// Extracts per-seat outcomes: bb/100 for cash tables, finishing place for tournaments.
+    /// Pools a table's seats by bot: bb/100 over all of a bot's seats (total net / total
+    /// hands) for cash tables, mean finishing place for tournaments.
     pub fn from_result(r: &TableResult) -> TableOutcome {
+        // (bot, net, hands, place sum, instances)
+        let mut acc: Vec<(usize, i64, u64, f64, u32)> = Vec::new();
+        for s in &r.seats {
+            let i = match acc.iter().position(|a| a.0 == s.bot) {
+                Some(i) => i,
+                None => {
+                    acc.push((s.bot, 0, 0, 0.0, 0));
+                    acc.len() - 1
+                }
+            };
+            acc[i].1 += s.stats.net;
+            acc[i].2 += s.stats.hands;
+            acc[i].3 += s.place.unwrap_or(u32::MAX) as f64;
+            acc[i].4 += 1;
+        }
         TableOutcome {
             placement: r.tournament,
-            seats: r
-                .seats
-                .iter()
-                .map(|s| SeatOutcome {
-                    bot: s.bot,
+            bots: acc
+                .into_iter()
+                .map(|(bot, net, hands, place_sum, n)| BotOutcome {
+                    bot,
                     value: if r.tournament {
-                        -(s.place.unwrap_or(u32::MAX) as f64)
+                        -(place_sum / n as f64)
+                    } else if hands == 0 {
+                        0.0
                     } else {
-                        s.stats.bb_per_100(r.bb)
+                        net as f64 / r.bb as f64 / hands as f64 * 100.0
                     },
                 })
                 .collect(),
@@ -155,15 +174,22 @@ impl RatingSystem for PairwiseElo {
     }
 
     fn add_table(&mut self, o: &TableOutcome) {
-        let n = o.seats.len();
+        debug_assert!(
+            o.bots
+                .iter()
+                .enumerate()
+                .all(|(i, a)| o.bots[..i].iter().all(|b| b.bot != a.bot)),
+            "TableOutcome must list distinct bots (use TableOutcome::from_result to pool)"
+        );
+        let n = o.bots.len();
         if n < 2 {
             return;
         }
         let scale = self.cfg.k / (n - 1) as f64;
-        for (i, si) in o.seats.iter().enumerate() {
+        for (i, si) in o.bots.iter().enumerate() {
             let mut sum = 0.0;
-            for (j, sj) in o.seats.iter().enumerate() {
-                if i == j || si.bot == sj.bot {
+            for (j, sj) in o.bots.iter().enumerate() {
+                if i == j {
                     continue;
                 }
                 let e = Self::expected(self.ratings[si.bot], self.ratings[sj.bot]);
@@ -191,11 +217,37 @@ mod tests {
 
     fn table(v: &[(usize, f64)]) -> TableOutcome {
         TableOutcome {
-            seats: v
+            bots: v
                 .iter()
-                .map(|&(bot, value)| SeatOutcome { bot, value })
+                .map(|&(bot, value)| BotOutcome { bot, value })
                 .collect(),
             placement: false,
+        }
+    }
+
+    fn result(seats: &[(usize, i64, Option<u32>)], tournament: bool) -> TableResult {
+        use crate::stats::SeatStats;
+        use crate::table::SeatResult;
+        TableResult {
+            hands_played: 100,
+            bb: 2,
+            tournament,
+            hand_history: None,
+            seats: seats
+                .iter()
+                .enumerate()
+                .map(|(i, &(bot, net, place))| SeatResult {
+                    bot,
+                    seat: i,
+                    stats: SeatStats {
+                        hands: 100,
+                        net,
+                        ..Default::default()
+                    },
+                    final_stack: 0,
+                    place,
+                })
+                .collect(),
         }
     }
 
@@ -246,34 +298,72 @@ mod tests {
     }
 
     #[test]
-    fn same_bot_pairs_excluded_and_seats_not_pooled() {
-        // Bot 0 holds two seats: one beats bot 1, one loses to it. Each seat is scored on its
-        // own against bot 1 only (K/(N-1) = 8): +4 and -4, so bot 0 nets zero, as does bot 1.
+    fn duplicate_seats_are_pooled() {
+        // Bot 0 holds two seats (+20 and -30 chips over 100 hands each): pooled net -10 over
+        // 200 hands = -2.5 bb/100, which loses to bot 1 (0). n = 2 distinct bots, so K/(n-1)
+        // = 16 and bot 0 loses 8.
+        let o = TableOutcome::from_result(&result(
+            &[(0, 20, None), (0, -30, None), (1, 0, None)],
+            false,
+        ));
+        assert_eq!(o.bots.len(), 2);
+        assert_eq!(
+            o.bots[0],
+            BotOutcome {
+                bot: 0,
+                value: -2.5
+            }
+        );
         let mut e = PairwiseElo::new(RatingConfig::default(), vec![1500.0, 1500.0]);
         e.begin_round();
-        e.add_table(&table(&[(0, 20.0), (0, -30.0), (1, 0.0)]));
+        e.add_table(&o);
         e.end_round();
-        assert_eq!(e.ratings(), &[1500.0, 1500.0]);
+        assert_eq!(e.ratings(), &[1492.0, 1508.0]);
         // A table of a single bot changes nothing.
         e.begin_round();
-        e.add_table(&table(&[(0, 20.0), (0, -20.0)]));
+        e.add_table(&TableOutcome::from_result(&result(
+            &[(0, 5, None), (0, -5, None)],
+            false,
+        )));
         e.end_round();
-        assert_eq!(e.ratings(), &[1500.0, 1500.0]);
+        assert_eq!(e.ratings(), &[1492.0, 1508.0]);
+    }
+
+    #[test]
+    fn tournament_pools_mean_place() {
+        let o = TableOutcome::from_result(&result(
+            &[
+                (0, 0, Some(1)),
+                (0, 0, Some(4)),
+                (1, 0, Some(2)),
+                (2, 0, Some(3)),
+            ],
+            true,
+        ));
+        assert!(o.placement);
+        let v: Vec<f64> = o.bots.iter().map(|b| b.value).collect();
+        assert_eq!(v, vec![-2.5, -2.0, -3.0]);
     }
 
     #[test]
     fn zero_sum_with_duplicate_seats() {
         let mut e = PairwiseElo::new(RatingConfig::default(), vec![1500.0, 1450.0, 1600.0]);
         e.begin_round();
-        e.add_table(&table(&[
-            (0, 20.0),
-            (0, -30.0),
-            (1, 0.0),
-            (2, 5.0),
-            (1, 9.0),
-            (2, -1.0),
-        ]));
-        e.add_table(&table(&[(2, 1.0), (1, 2.0), (1, 3.0)]));
+        e.add_table(&TableOutcome::from_result(&result(
+            &[
+                (0, 20, None),
+                (0, -30, None),
+                (1, 0, None),
+                (2, 5, None),
+                (1, 9, None),
+                (2, -1, None),
+            ],
+            false,
+        )));
+        e.add_table(&TableOutcome::from_result(&result(
+            &[(2, 1, None), (1, 2, None), (1, -3, None)],
+            false,
+        )));
         e.end_round();
         assert!((e.ratings().iter().sum::<f64>() - 4550.0).abs() < 1e-9);
     }

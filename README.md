@@ -32,8 +32,8 @@ cd python && python3 -m venv .venv && .venv/bin/pip install maturin numpy pytest
 .venv/bin/maturin develop --release && .venv/bin/python -m pytest
 ```
 
-`arena run --config <file> [--seed N] [--threads N] [--rounds N] [--fresh] [--quiet]
-[--leaderboard F] [--results-dir D]` prints the sorted leaderboard and writes
+`arena run --config <file> [--seed N] [--threads N] [--rounds N] [--hands N] [--fresh]
+[--quiet] [--leaderboard F] [--results-dir D]` prints the sorted leaderboard and writes
 `results/<run_id>/`, which holds `config.toml`, `schedule.json`, `tables.jsonl`,
 `leaderboard.json`, `leaderboard.txt` and, if enabled, `hand_histories/`. It also updates
 `leaderboard.json`. Each run starts from the stored ratings unless you pass `--fresh`.
@@ -211,8 +211,8 @@ Inputs are `k` bots, a seats-per-table target `s` (default `max_seats`), `min_ap
 `allow_duplicate_bot_at_table` and a seed (derived from the master seed and the round).
 
 1. **Effective seats**: `s' = min(s, k)` without duplicates, otherwise `s' = s`. When `k < s`,
-   tables are filled with independent instances of the same bots. Each instance is its own
-   seat, aggregated into that bot's stats.
+   tables are filled with independent instances of the same bots. Their seats are
+   aggregated into that bot's stats and pooled per table for rating.
 2. **Tables**: `T = max(k, ⌈m·k/s'⌉, min_tables)`.
 3. **Fill**: concatenate independent random permutations of the bots and cut the first `T·s'`
    entries into tables. Every bot then appears `⌊T·s'/k⌋` or `⌈T·s'/k⌉` times, which is at
@@ -230,27 +230,28 @@ hold, that `T ≥ k`, and that schedules are deterministic.
 
 ## Ratings: pairwise multiplayer Elo
 
-Every seat at a table is a separate participant. Seats are never pooled, even when one bot
-holds several. For seat `i` (bot `a`) and every seat `j` held by a **different** bot `b`
-(same-bot pairs are skipped):
+**Pooling.** When a bot holds several seats at a table (duplicates allowed and `k < s`), its
+seats are pooled into one result for that table. In cash games that's its bb/100 over all
+its seats (total net / total hands). In tournaments it's the mean finishing place of its
+instances. Rating then works on the `n` distinct bots at the table. For each pair of
+distinct bots `(i, j)`:
 
-- Expected score: `E_ij = 1 / (1 + 10^((R_b − R_a)/400))`, using ratings frozen at round start.
+- Expected score: `E_ij = 1 / (1 + 10^((R_j − R_i)/400))`, using ratings frozen at round start.
 - Actual score `S_ij`:
-  - **Cash** compares per-seat **bb/100** at that table. `binary` gives 1, ½ or 0. `margin`
+  - **Cash** compares pooled **bb/100** at that table. `binary` gives 1, ½ or 0. `margin`
     gives `½ + ½·tanh((w_i − w_j)/c)`, with `c = 30` by default.
-  - **Tournaments** compare **finishing places** (1, ½ or 0). Players busted in the same hand
-    are ordered by their stack at the start of that hand. `margin` falls back to places.
-- Update: `Δ_i = K/(N−1) · Σ_j (S_ij − E_ij)`, where `N` is the number of seats at the table.
+  - **Tournaments** compare (mean) **finishing places** (1, ½ or 0). Players busted in the
+    same hand are ordered by their stack at the start of that hand. `margin` falls back to
+    places.
+- Update: `Δ_i = K/(n−1) · Σ_j (S_ij − E_ij)`.
 
-A bot's delta is the sum over all its seats in the round, applied once at round end, so
-results don't depend on table order. With one seat per bot this is exactly
-`K/(n−1)·Σ_j(S_ij − E_ij)`. A shared per-table divisor keeps every pair's update symmetric,
-so total rating is conserved even with duplicate seats. Defaults: initial 1500, K = 16.
-The `RatingSystem` trait (`begin_round`, `add_table`, `end_round`, `ratings`) leaves room for
+Deltas accumulate over the whole round and are applied once at round end, so results don't
+depend on table order. Each pair's update is symmetric, so total rating is conserved.
+Defaults: initial 1500, K = 16. The `RatingSystem` trait (`begin_round`, `add_table`, `end_round`, `ratings`) leaves room for
 TrueSkill or Plackett–Luce.
 
 The leaderboard reports Elo and its change, hands, hand-weighted bb/100, and a 95% CI of
-`±1.96·sd/√n`, computed over the per-(table, seat) bb/100 samples. It also shows VPIP, PFR,
+`±1.96·sd/√n`, computed over the per-table bb/100 samples (the bot's seats at a table pooled). It also shows VPIP, PFR,
 showdown rate, illegal actions, mean decision time and (tournaments) mean place. In
 tournaments bb/100 uses the first level's big blind.
 
