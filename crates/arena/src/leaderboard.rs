@@ -40,9 +40,13 @@ pub struct LeaderboardRow {
     pub mean_decision_us: f64,
     /// Mean finishing place (tournaments only).
     pub avg_place: Option<f64>,
+    /// True if the rating is a fixed anchor.
+    #[serde(default)]
+    pub anchored: bool,
 }
 
 impl LeaderboardRow {
+    #[allow(clippy::too_many_arguments)] // plain-data constructor, crate-internal
     pub(crate) fn build(
         key: &str,
         rating: f64,
@@ -51,6 +55,7 @@ impl LeaderboardRow {
         samples: &[f64],
         places: &[u32],
         bb: u64,
+        anchored: bool,
     ) -> LeaderboardRow {
         let n = samples.len();
         let ci95 = (n >= 2).then(|| {
@@ -74,13 +79,26 @@ impl LeaderboardRow {
             mean_decision_us: st.mean_decision_us(),
             avg_place: (!places.is_empty())
                 .then(|| places.iter().map(|&p| p as f64).sum::<f64>() / places.len() as f64),
+            anchored,
         }
     }
 }
 
 /// Renders rows as an aligned text table.
 pub fn render(rows: &[LeaderboardRow]) -> String {
-    let w = rows.iter().map(|r| r.key.len()).max().unwrap_or(3).max(3);
+    let label = |r: &LeaderboardRow| {
+        if r.anchored {
+            format!("{} (anchor)", r.key)
+        } else {
+            r.key.clone()
+        }
+    };
+    let w = rows
+        .iter()
+        .map(|r| label(r).len())
+        .max()
+        .unwrap_or(3)
+        .max(3);
     let tournament = rows.iter().any(|r| r.avg_place.is_some());
     let mut o = String::new();
     let _ = write!(
@@ -111,7 +129,7 @@ pub fn render(rows: &[LeaderboardRow]) -> String {
             o,
             "{:>3}  {:<w$}  {:>7.1}  {:>+7.1}  {:>10}  {:>16}  {:>5.1}%  {:>5.1}%  {:>5.1}%  {:>7}  {:>9.2}",
             i + 1,
-            r.key,
+            label(r),
             r.rating,
             r.rating_change,
             r.hands,
@@ -302,6 +320,7 @@ pub fn write_results_dir(
     for r in rounds {
         for (t, res) in r.results.iter().enumerate() {
             let mut res = res.clone();
+            res.recorded_hands.clear(); // replays are written separately (crate::replays)
             if let Some(hh) = res.hand_history.take() {
                 let hh_dir = dir.join("hand_histories");
                 std::fs::create_dir_all(&hh_dir)?;

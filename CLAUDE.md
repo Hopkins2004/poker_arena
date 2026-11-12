@@ -6,7 +6,7 @@ High-throughput engine for running poker bots against each other (6-max NLH firs
 
 - **Rust (stable, edition 2021)** for everything performance-critical: cards, hand evaluation, game state machine, table runner, matchmaking, ratings.
 - **rayon** for CPU parallelism (one table = one task; tables never share mutable state).
-- **PyO3 + maturin** for Python bindings, so Python bots (NumPy/PyTorch) can plug in. Python is a *client* of the engine, never in the hot path for Rust-vs-Rust bots.
+- **PyO3 + maturin** for Python bindings. **All bots are Python** (NumPy/PyTorch friendly); the Rust engine deals, enforces rules, runs tables in worker processes and rates results. Baselines live in `pokerarena.baselines` (random 850, calling station 400, tight-aggressive 1300, as anchored Elo).
 - **serde + toml** for config, **serde_json** for results and leaderboards, **clap** for the CLI.
 - Testing: built-in `#[test]`, **proptest** for invariants, **criterion** for benchmarks.
 - RNG: `rand_xoshiro` (Xoshiro256++) or `rand_chacha`, always seeded explicitly. Never use `thread_rng()` in engine code.
@@ -15,15 +15,14 @@ High-throughput engine for running poker bots against each other (6-max NLH firs
 
 ```
 crates/
-  engine/    # cards, deck, hand evaluator, game rules, state machine. No I/O, no threads.
-  arena/     # bot trait, table runner, matchmaking, ratings, stats, config, parallel scheduler
-  bots/      # baseline bots: random-legal, calling-station, tight-aggressive rule bot
-  cli/       # `arena` binary: run, bench, leaderboard
-python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` + example bots
+  engine/    # cards, deck, hand evaluator, equity, game rules, state machine. No I/O, no threads.
+  arena/     # bot trait, table runner, matchmaking, ratings (with anchors), stats, replays, config, parallel scheduler
+  cli/       # `arena` binary: bench, leaderboard
+python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` (baselines, runner, desktop GUI) + example bots
 configs/     # example TOML configs
 ```
 
-Dependency direction: `engine` ← `arena` ← `bots`, `cli`, `python`. `engine` must not depend on anything heavier than `rand` core traits.
+Dependency direction: `engine` ← `arena` ← `cli`, `python`. `engine` must not depend on anything heavier than `rand` core traits.
 
 ## Core design rules
 
@@ -86,7 +85,7 @@ cargo build --release
 cargo test --workspace
 cargo test --workspace --release -- --ignored        # slow exhaustive tests (evaluator enumeration)
 cargo bench -p engine                                # evaluator + hand-throughput benchmarks
-cargo run --release -p cli -- run --config configs/6max_nlh.toml
+cargo run --release -p cli -- bench                 # runs with bots: Poker Arena.app or pokerarena.run
 cargo clippy --workspace -- -D warnings && cargo fmt --check
 cd python && maturin develop --release && pytest
 ```

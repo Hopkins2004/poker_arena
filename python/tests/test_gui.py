@@ -29,7 +29,12 @@ def pump(app, until, timeout=60.0):
 def test_defaults_and_plan(app):
     w = ArenaWindow()
     w.update_plan()
-    assert "7</b> bots" in w.plan.text() and "35</b> tables" in w.plan.text()
+    assert "7</b> bots (3 anchored)" in w.plan.text() and "35</b> tables" in w.plan.text()
+    assert not hasattr(w, "min_appearances") and not hasattr(w, "threads")
+    starts = {w.players.item(r, 0).text(): w.players.item(r, w.players.START).text()
+              for r in range(w.players.rowCount())}
+    assert starts["random"] == "850  (anchor)" and starts["station"] == "400  (anchor)"
+    assert starts["tag"] == "1300  (anchor)" and starts["tag_loose"] == "1500  (initial)"
     assert w.run_btn.isEnabled() and not w.stop_btn.isEnabled()
     # A broken params cell disables Run with a readable message.
     w.players.item(0, 3).setText("{oops")
@@ -38,30 +43,59 @@ def test_defaults_and_plan(app):
     w.close()
 
 
-def test_python_champions_full_run(app):
+def test_champions_full_run_with_replays(app, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # replays land in ./hand_replays
     w = ArenaWindow()
-    w.preset.setCurrentText("Python champions (3 bots)")
+    w.preset.setCurrentText("Champions: tag variants (3 bots)")
     w.load_preset()
     assert w.players.rowCount() == 3
     w.hands.setValue(300)
     w.rounds.setValue(2)
     w.processes.setValue(2)
+    w.replays.setChecked(True)
     w.start_run()
     assert w.stop_btn.isEnabled() and not w.run_btn.isEnabled()
     pump(app, lambda: w.job is None)
     assert w.progress.format() == "Done"
     assert w.board.rowCount() == 3
-    types = {w.board.item(r, 2).text() for r in range(3)}
-    assert types == {"Python"}
-    assert all(w.board.item(r, 11).text() == "0" for r in range(3)), "no illegal actions"
+    cols = [w.board.horizontalHeaderItem(c).text() for c in range(w.board.columnCount())]
+    assert "Type" not in cols
+    ill = cols.index("Illegal")
+    assert all(w.board.item(r, ill).text() == "0" for r in range(3)), "no illegal actions"
+    tag_row = next(r for r in range(3) if w.board.item(r, 1).text().startswith("tag  (anchor)"))
+    assert w.board.item(tag_row, 2).text() == "1300.0" and w.board.item(tag_row, 3).text() == "—"
+    replay_dirs = list((tmp_path / "hand_replays").iterdir())
+    assert len(replay_dirs) == 1
+    assert sorted(p.name for p in replay_dirs[0].iterdir()) == ["tag.txt", "tag_loose.txt", "tag_tight.txt"]
+    assert "Hand replays" in w.saved.text()
     assert w.run_btn.isEnabled()
+    w.close()
+
+
+def test_save_toggle_reuses_saved_elo(app, tmp_path):
+    lb = tmp_path / "lb.json"
+    lb.write_text('{"entries": {"tag_loose": {"rating": 1612.5, "hands": 1, "net_bb": 0, '
+                  '"tables": 1, "runs": 1, "last_run": "x"}, "tag": {"rating": 1777, "hands": 1, '
+                  '"net_bb": 0, "tables": 1, "runs": 1, "last_run": "x"}}}')
+    w = ArenaWindow()
+    w.base_cfg.setdefault("run", {})["leaderboard"] = str(lb)
+    w.update_plan()
+    col = w.players.START
+    start = lambda name: next(w.players.item(r, col).text() for r in range(w.players.rowCount())
+                              if w.players.item(r, 0).text() == name)
+    assert start("tag_loose") == "1500  (initial)"  # save off: fresh ratings
+    w.save.setChecked(True)
+    w.update_plan()
+    assert start("tag_loose") == "1612  (saved)"  # rendered without decimals
+    assert start("tag") == "1300  (anchor)"  # anchors win over saved ratings
+    assert "1 continue from saved Elo" in w.plan.text()
     w.close()
 
 
 def test_stop_button_nukes_mixed_run(app):
     before = baseline()
     w = ArenaWindow()
-    w.preset.setCurrentText("Rust vs Python champions (6 bots)")
+    w.preset.setCurrentText("Demo lineup (7 bots)")
     w.load_preset()
     w.hands.setValue(5_000_000)
     w.processes.setValue(3)
@@ -83,7 +117,7 @@ def test_stop_button_nukes_mixed_run(app):
 def test_closing_window_during_run_stops_it(app):
     before = baseline()
     w = ArenaWindow()
-    w.preset.setCurrentText("Python trio (3 bots)")
+    w.preset.setCurrentText("Trio (3 bots)")
     w.load_preset()
     w.hands.setValue(5_000_000)
     w.start_run()

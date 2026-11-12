@@ -1,26 +1,28 @@
 """A controllable run: background execution, live progress and a hard stop.
 
-:class:`ArenaJob` drives one run (Rust and Python bots). It is used by :func:`pokerarena.run`
-(blocking) and by the GUI (background thread + polling).
+:class:`ArenaJob` drives one run. It is used by :func:`pokerarena.run` (blocking) and by the
+GUI (background thread + polling).
 
 How tables execute:
 
-* Tables that seat only Rust bots run inside the Rust engine on a thread pool, with the GIL
-  released. They poll a cancellation flag before every hand.
-* Tables that seat a Python bot run in a ``multiprocessing`` pool of worker processes (one
-  table per task). A worker reports finished hands for its table into a slot of a shared
-  ``RawArray``, so the parent can show hand-level progress without locks.
+* Every table (all bots are Python) runs in a ``multiprocessing`` pool of worker processes,
+  one table per task. Each worker plays its table through the Rust engine and reports
+  finished hands into a slot of a shared ``RawArray``, so the parent can show hand-level
+  progress without locks.
+* On free-threaded CPython with ``threaded=True``, tables run in-process on a Rust thread
+  pool instead, with the GIL released.
 * Results are merged in table-id order and ratings are updated once per round. The output is
   identical for any process or thread count.
+* If enabled (``[run] replay_hands_per_bot``), a random sample of hands per bot is recorded
+  and written to ``hand_replays/<run_id>/`` after a completed run.
 
 **Stopping** (:meth:`ArenaJob.stop`) is a hard stop:
 
-* The Rust cancellation flag is set, so in-process tables stop before their next hand
-  (microseconds).
 * The worker pool is ``terminate()``-d and joined, which kills worker processes even if a
   Python bot is stuck in an infinite loop.
-* Nothing is written: results and the leaderboard are saved only after the last round, and
-  those writes are atomic (temp file or directory, then rename).
+* The Rust cancellation flag is set, so in-process tables stop before their next hand.
+* Nothing is written: results, the leaderboard and hand replays are saved only after the
+  last round, and those writes are atomic (temp file or directory, then rename).
 * All cleanup happens on the driver thread in a ``finally`` block, so after :meth:`wait`
   returns no worker processes, pool threads or result handles are left behind.
 """
@@ -66,6 +68,8 @@ class RunResult:
     """The leaderboard rendered as text."""
     results_dir: Optional[str] = None
     """``results/<run_id>`` directory, if results were saved."""
+    replays_dir: Optional[str] = None
+    """``hand_replays/<run_id>`` directory, if hand replays were enabled."""
     hands: int = 0
     """Hands played."""
     tables: int = 0
@@ -170,7 +174,7 @@ class ArenaJob:
         seed, rounds, threads: override the config.
         fresh: ignore stored ratings for these bots.
         save: write ``results/<run_id>/`` and update the leaderboard when the run completes.
-        leaderboard, results_dir: override the config's paths.
+        leaderboard, results_dir, replays_dir: override the config's paths.
         on_round: called as ``on_round(round_index, n_rounds, n_tables, n_python_tables)``
             on the driver thread after each round.
 
@@ -191,6 +195,7 @@ class ArenaJob:
         save: bool = True,
         leaderboard: Optional[Union[str, os.PathLike]] = None,
         results_dir: Optional[Union[str, os.PathLike]] = None,
+        replays_dir: Optional[Union[str, os.PathLike]] = None,
         on_round: Optional[Callable[[int, int, int, int], None]] = None,
     ) -> None:
         self.text = _read_config(config)
@@ -206,10 +211,14 @@ class ArenaJob:
         self.processes = processes or os.cpu_count() or 1
         self.save = save
         self.results_dir = os.fspath(results_dir) if results_dir is not None else None
+        self.replays_dir = os.fspath(replays_dir) if replays_dir is not None else None
         self.on_round = on_round
 
         run = self._run
         self.keys = list(run.keys)
+        self.run_id = run.run_id
+        self.initial_ratings = dict(zip(run.keys, run.initial_ratings))
+        self.anchors = dict(zip(run.keys, run.anchors))
         self._schedules = [run.schedule(r) for r in range(run.n_rounds)]
         self._py_tables = [run.python_tables(r) for r in range(run.n_rounds)]
         self._offsets = []
@@ -355,6 +364,8 @@ class ArenaJob:
             res.tournament = self.tournament
             if self.save:
                 res.results_dir = run.finish(self.results_dir, True)
+            # Hand replays are independent of saving results/leaderboard.
+            res.replays_dir = run.write_replays(self.replays_dir)
             self.result = res
             status = "done"
         except (Cancelled, _Stopped):

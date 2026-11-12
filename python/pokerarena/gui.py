@@ -3,11 +3,13 @@
 Open it by double-clicking ``Poker Arena.app`` at the repository root, or with
 ``python -c "from pokerarena.gui import main; main()"``.
 
-Set up a run (game, tables, rating, and the players: Rust bots, the Python ports in
-:mod:`pokerarena.baselines`, or any ``module.ClassName``), press **Run**, watch the progress
-bar, and read the leaderboard at the end. **Stop** is a hard stop. In-process Rust tables
-stop before their next hand, Python worker processes are killed (even a bot stuck in an
-infinite loop), and nothing is written to disk. See :mod:`pokerarena.job`.
+Set up a run (game, tables, rating, and the players: the baselines in
+:mod:`pokerarena.baselines` or any ``module.ClassName``, optionally anchored at a fixed Elo),
+press **Run**, watch the progress bar, and read the leaderboard at the end. With "Save
+results & leaderboard" on, bots start from their saved Elo. "Save 100 random hands per bot"
+writes hand replays to ``hand_replays/<run_id>/``. **Stop** is a hard stop: worker processes
+are killed (even a bot stuck in an infinite loop) and nothing is written to disk. See
+:mod:`pokerarena.job`.
 """
 
 from __future__ import annotations
@@ -53,51 +55,36 @@ from .job import ArenaJob
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # (label, kind) shown in each player's "Bot" menu. CUSTOM enables the class column.
+PY = "python:pokerarena.baselines."
 CUSTOM = "Custom Python class…"
 BOT_CHOICES = [
-    ("Tight-aggressive (Rust)", "tag"),
-    ("Random (Rust)", "random"),
-    ("Calling station (Rust)", "calling_station"),
-    ("Tight-aggressive (Python)", "python:pokerarena.baselines.TightAggressive"),
-    ("Random (Python)", "python:pokerarena.baselines.RandomLegal"),
-    ("Calling station (Python)", "python:pokerarena.baselines.CallingStation"),
+    ("Tight-aggressive", PY + "TightAggressive"),
+    ("Random", PY + "RandomLegal"),
+    ("Calling station", PY + "CallingStation"),
     (CUSTOM, None),
 ]
 KIND_TO_LABEL = {k: l for l, k in BOT_CHOICES if k}
 DEFAULT_PARAMS = {
-    "tag": {"samples": 300, "tightness": 0.0, "call_margin": 0.05},
-    "random": {"fold": 1.0, "call": 2.0, "raise": 1.0, "raise_sizes": [0.5, 1.0]},
-    "calling_station": {},
+    PY + "TightAggressive": {"samples": 300, "tightness": 0.0, "call_margin": 0.05},
+    PY + "RandomLegal": {"fold": 1.0, "call": 2.0, "raise": 1.0, "raise_sizes": [0.5, 1.0]},
+    PY + "CallingStation": {},
 }
-DEFAULT_PARAMS["python:pokerarena.baselines.TightAggressive"] = DEFAULT_PARAMS["tag"]
-DEFAULT_PARAMS["python:pokerarena.baselines.RandomLegal"] = DEFAULT_PARAMS["random"]
-DEFAULT_PARAMS["python:pokerarena.baselines.CallingStation"] = {}
 
-PY = "python:pokerarena.baselines."
-_TAG_LOOSE = {"samples": 200, "tightness": -3.0, "call_margin": 0.0}
-_TAG = {"samples": 300}
-_TAG_TIGHT = {"samples": 300, "tightness": 2.0}
+# The anchored baselines: their Elo never moves and pins the scale.
+BASELINES = [
+    ("random", PY + "RandomLegal", {"fold": 1.0, "call": 2.0, "raise": 1.0, "raise_sizes": [0.5, 1.0]}, 850.0),
+    ("station", PY + "CallingStation", {}, 400.0),
+    ("tag", PY + "TightAggressive", {"samples": 300}, 1300.0),
+]
+_TAG_LOOSE = ("tag_loose", PY + "TightAggressive", {"samples": 200, "tightness": -3.0, "call_margin": 0.0}, None)
+_TAG_TIGHT = ("tag_tight", PY + "TightAggressive", {"samples": 300, "tightness": 2.0}, None)
+_RANDOM_PASSIVE = ("random_passive", PY + "RandomLegal",
+                   {"fold": 2.0, "call": 3.0, "raise": 0.2, "raise_sizes": [0.5]}, None)
 PRESETS = {
-    "Rust demo lineup (7 bots)": None,  # loaded from configs/6max_nlh.toml
-    "Python champions (3 bots)": [
-        ("py_tag_loose", PY + "TightAggressive", _TAG_LOOSE),
-        ("py_tag", PY + "TightAggressive", _TAG),
-        ("py_tag_tight", PY + "TightAggressive", _TAG_TIGHT),
-    ],
-    "Rust vs Python champions (6 bots)": [
-        ("tag_loose", "tag", _TAG_LOOSE),
-        ("tag", "tag", _TAG),
-        ("tag_tight", "tag", _TAG_TIGHT),
-        ("py_tag_loose", PY + "TightAggressive", _TAG_LOOSE),
-        ("py_tag", PY + "TightAggressive", _TAG),
-        ("py_tag_tight", PY + "TightAggressive", _TAG_TIGHT),
-    ],
-    "Python trio (3 bots)": [
-        ("py_tag_loose", PY + "TightAggressive", _TAG_LOOSE),
-        ("py_random_passive", PY + "RandomLegal",
-         {"fold": 2.0, "call": 3.0, "raise": 0.2, "raise_sizes": [0.5]}),
-        ("py_station", PY + "CallingStation", {}),
-    ],
+    "Demo lineup (7 bots)": None,  # loaded from configs/6max_nlh.toml
+    "Baselines (3 anchored bots)": BASELINES,
+    "Champions: tag variants (3 bots)": [BASELINES[2], _TAG_LOOSE, _TAG_TIGHT],
+    "Trio (3 bots)": [_TAG_LOOSE, _RANDOM_PASSIVE, BASELINES[1]],
 }
 
 FALLBACK_CONFIG = {
@@ -109,10 +96,10 @@ FALLBACK_CONFIG = {
     "matchmaking": {"min_appearances": 4, "allow_duplicate_bot_at_table": True, "min_tables": 0,
                     "balance_pairs": True},
     "rating": {"k": 16.0, "score_mode": "binary"},
-    "bots": [{"name": "tag", "kind": "tag", "params": {"samples": 300}},
-             {"name": "random", "kind": "random", "params": {}},
-             {"name": "station", "kind": "calling_station", "params": {}}],
+    "bots": [{"name": n, "kind": k, "params": p, "anchor": a} for n, k, p, a in BASELINES],
 }
+
+REPLAY_HANDS_PER_BOT = 100
 
 
 def load_default_config() -> dict:
@@ -169,9 +156,11 @@ def _fmt_rate(x: float) -> str:
 
 
 class PlayersTable(QTableWidget):
-    """Editable list of bots: name, bot type, custom Python class, JSON params."""
+    """Editable list of bots: name, bot type, custom Python class, JSON params, optional
+    anchor Elo, and the (read-only) Elo the bot will start the run with."""
 
-    COLS = ["Name", "Bot", "Python class (custom)", "Params (JSON)", ""]
+    COLS = ["Name", "Bot", "Python class (custom)", "Params (JSON)", "Anchor Elo", "Start Elo", ""]
+    ANCHOR, START, REMOVE = 4, 5, 6
 
     def __init__(self, on_change):
         super().__init__(0, len(self.COLS))
@@ -182,14 +171,23 @@ class PlayersTable(QTableWidget):
         h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(self.ANCHOR, QHeaderView.ResizeMode.Interactive)
+        h.setSectionResizeMode(self.START, QHeaderView.ResizeMode.Interactive)
+        h.setSectionResizeMode(self.REMOVE, QHeaderView.ResizeMode.ResizeToContents)
+        self.setColumnWidth(self.ANCHOR, 90)
+        self.setColumnWidth(self.START, 130)
+        self.horizontalHeaderItem(self.ANCHOR).setToolTip(
+            "Optional fixed Elo. An anchored bot's rating never changes; it pins the scale.")
+        self.horizontalHeaderItem(self.START).setToolTip(
+            "Elo the bot starts this run with: its anchor, else its saved rating (when "
+            "'Save results & leaderboard' is on and it has one), else the initial rating.")
         self.setColumnWidth(0, 150)
         self.setColumnWidth(2, 210)
         self.verticalHeader().setVisible(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.itemChanged.connect(lambda *_: self.on_change())
 
-    def add_bot(self, name: str, kind: str, params: dict, version=None) -> None:
+    def add_bot(self, name: str, kind: str, params: dict, version=None, anchor=None) -> None:
         r = self.rowCount()
         self.blockSignals(True)
         self.insertRow(r)
@@ -208,10 +206,14 @@ class PlayersTable(QTableWidget):
         self.setCellWidget(r, 1, combo)
         self.setCellWidget(r, 2, custom)
         self.setItem(r, 3, QTableWidgetItem(json.dumps(params or {})))
+        self.setItem(r, self.ANCHOR, QTableWidgetItem("" if anchor is None else f"{float(anchor):g}"))
+        start = QTableWidgetItem("")
+        start.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.setItem(r, self.START, start)
         remove = QPushButton("✕")
         remove.setToolTip("Remove this bot")
         remove.setFixedWidth(34)
-        self.setCellWidget(r, 4, remove)
+        self.setCellWidget(r, self.REMOVE, remove)
         self.blockSignals(False)
 
         def kind_changed(_i, combo=combo, custom=custom):
@@ -237,7 +239,8 @@ class PlayersTable(QTableWidget):
     def set_bots(self, bots) -> None:
         self.setRowCount(0)
         for b in bots:
-            self.add_bot(b["name"], b["kind"], b.get("params") or {}, b.get("version"))
+            self.add_bot(b["name"], b["kind"], b.get("params") or {}, b.get("version"),
+                         b.get("anchor"))
 
     def bots(self) -> list:
         """Reads the table; raises ValueError with a readable message on bad input."""
@@ -260,11 +263,31 @@ class PlayersTable(QTableWidget):
             if not isinstance(params, dict):
                 raise ValueError(f"{name}: params must be a JSON object, e.g. {{}}")
             bot = {"name": name, "kind": kind, "params": params}
+            anchor_text = self.item(r, self.ANCHOR).text().strip() if self.item(r, self.ANCHOR) else ""
+            if anchor_text:
+                try:
+                    bot["anchor"] = float(anchor_text)
+                except ValueError:
+                    raise ValueError(f"{name}: anchor Elo must be a number (or empty)") from None
             version = self.item(r, 0).data(Qt.ItemDataRole.UserRole)
             if version:
                 bot["version"] = str(version)
             out.append(bot)
         return out
+
+    def set_start_elos(self, values) -> None:
+        """values: one (rating, source) per row, or None to clear."""
+        self.blockSignals(True)
+        for r in range(self.rowCount()):
+            item = self.item(r, self.START)
+            if item is None:
+                continue
+            if values is None or r >= len(values):
+                item.setText("")
+            else:
+                rating, source = values[r]
+                item.setText(f"{rating:.0f}  ({source})")
+        self.blockSignals(False)
 
 
 class ArenaWindow(QMainWindow):
@@ -274,7 +297,6 @@ class ArenaWindow(QMainWindow):
         self.default_cfg = load_default_config()
         self.base_cfg = copy.deepcopy(self.default_cfg)
         self.job: ArenaJob | None = None
-        self._kinds_by_key: dict[str, str] = {}
 
         self.plan_timer = QTimer(self, singleShot=True, interval=250)
         self.plan_timer.timeout.connect(self.update_plan)
@@ -321,7 +343,6 @@ class ArenaWindow(QMainWindow):
         self.rounds = _spin(1, 100_000, 5)
         self.seats_per_table = _spin(1, 10, 1, special="= max seats")
         self.min_tables = _spin(0, 100_000, 0, special="auto")
-        self.min_appearances = _spin(1, 1000, 4)
         self.allow_dup = QCheckBox()
         self.balance = QCheckBox()
         tables = QFormLayout()
@@ -330,13 +351,11 @@ class ArenaWindow(QMainWindow):
         tables.addRow("Rounds", self.rounds)
         tables.addRow("Players per table", self.seats_per_table)
         tables.addRow("Min tables per round", self.min_tables)
-        tables.addRow("Min appearances per bot", self.min_appearances)
         tables.addRow("Same bot twice at a table", self.allow_dup)
         tables.addRow("Balance pairings", self.balance)
         settings.addWidget(self._group("Tables", tables))
 
         self.seed = _spin(0, 2_000_000_000, 0)
-        self.threads = _spin(0, 1024, 0, special="all cores")
         self.processes = _spin(0, 1024, 0, special="all cores")
         self.score_mode = _combo([("Binary", "binary"), ("Margin (tanh)", "margin")])
         self.k = QDoubleSpinBox()
@@ -344,15 +363,21 @@ class ArenaWindow(QMainWindow):
         self.k.setValue(16)
         self.timing = QCheckBox()
         self.save = QCheckBox()
-        self.save.setToolTip(f"Writes results/<run_id>/ and updates leaderboard.json in {os.getcwd()}")
+        self.save.setToolTip(
+            f"Starts bots from their saved Elo in leaderboard.json (anchors excepted), then "
+            f"writes results/<run_id>/ and updates leaderboard.json in {os.getcwd()}")
+        self.replays = QCheckBox()
+        self.replays.setToolTip(
+            f"Saves {REPLAY_HANDS_PER_BOT} random hands per bot from the run as text hand "
+            f"histories in hand_replays/<run_id>/<bot>.txt (in {os.getcwd()})")
         runf = QFormLayout()
         runf.addRow("Seed", self.seed)
-        runf.addRow("Rust threads", self.threads)
         runf.addRow("Python processes", self.processes)
         runf.addRow("Elo score", self.score_mode)
         runf.addRow("Elo K-factor", self.k)
         runf.addRow("Record decision time", self.timing)
         runf.addRow("Save results && leaderboard", self.save)
+        runf.addRow(f"Save {REPLAY_HANDS_PER_BOT} random hands per bot", self.replays)
         settings.addWidget(self._group("Run", runf))
         root.addLayout(settings)
 
@@ -431,10 +456,11 @@ class ArenaWindow(QMainWindow):
             w.currentIndexChanged.connect(self.changed)
         for w in (self.max_seats, self.stack, self.sb, self.bb, self.ante, self.hands_per_level,
                   self.hands, self.rounds, self.seats_per_table, self.min_tables,
-                  self.min_appearances, self.seed, self.threads, self.processes):
+                  self.seed, self.processes):
             w.valueChanged.connect(self.changed)
         self.k.valueChanged.connect(self.changed)
-        for w in (self.duplicate, self.allow_dup, self.balance, self.timing):
+        for w in (self.duplicate, self.allow_dup, self.balance, self.timing, self.save,
+                  self.replays):
             w.toggled.connect(self.changed)
 
         self.load_config(self.default_cfg)
@@ -480,11 +506,10 @@ class ArenaWindow(QMainWindow):
         self.rounds.setValue(int(run.get("rounds", 5)))
         self.seats_per_table.setValue(int(m.get("seats_per_table") or 1))
         self.min_tables.setValue(int(m.get("min_tables", 0)))
-        self.min_appearances.setValue(int(m.get("min_appearances", 4)))
         self.allow_dup.setChecked(bool(m.get("allow_duplicate_bot_at_table", True)))
         self.balance.setChecked(bool(m.get("balance_pairs", False)))
         self.seed.setValue(int(run.get("seed", 0)))
-        self.threads.setValue(int(run.get("threads") or 0))
+        self.replays.setChecked(int(run.get("replay_hands_per_bot") or 0) > 0)
         _set_combo(self.score_mode, r.get("score_mode", "binary"))
         self.k.setValue(float(r.get("k", 16)))
         self.timing.setChecked(bool(t.get("record_timing", False)))
@@ -498,7 +523,8 @@ class ArenaWindow(QMainWindow):
         if bots is None:
             self.players.set_bots(self.default_cfg.get("bots", []))
         else:
-            self.players.set_bots([{"name": n, "kind": k, "params": dict(p)} for n, k, p in bots])
+            self.players.set_bots([{"name": n, "kind": k, "params": dict(p), "anchor": a}
+                                   for n, k, p, a in bots])
 
     def add_bot(self) -> None:
         names = {b for b in self._names()}
@@ -538,7 +564,6 @@ class ArenaWindow(QMainWindow):
         m.update({
             "seats_per_table": None if spt < 2 else spt,
             "min_tables": self.min_tables.value(),
-            "min_appearances": self.min_appearances.value(),
             "allow_duplicate_bot_at_table": self.allow_dup.isChecked(),
             "balance_pairs": self.balance.isChecked(),
         })
@@ -548,12 +573,8 @@ class ArenaWindow(QMainWindow):
         r.update({"score_mode": self.score_mode.currentData(), "k": self.k.value()})
         run = cfg.setdefault("run", {})
         run.update({"rounds": self.rounds.value(), "seed": self.seed.value()})
-        if self.threads.value():
-            run["threads"] = self.threads.value()
-        else:
-            run.pop("threads", None)
+        run["replay_hands_per_bot"] = REPLAY_HANDS_PER_BOT if self.replays.isChecked() else 0
         cfg["bots"] = self.players.bots()
-        self._kinds_by_key = {b["name"]: b["kind"] for b in cfg["bots"]}
         return cfg
 
     # ----------------------------------------------------------------------- reactions
@@ -571,23 +592,50 @@ class ArenaWindow(QMainWindow):
         if self.job is None or self.job.state not in ("running", "stopping"):
             self.plan_timer.start()
 
+    def saved_ratings(self) -> dict:
+        """Ratings stored in the leaderboard file (empty if none or unreadable)."""
+        path = Path(self.base_cfg.get("run", {}).get("leaderboard", "leaderboard.json"))
+        try:
+            with open(path) as f:
+                return {k: v["rating"] for k, v in json.load(f).get("entries", {}).items()}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
+
     def update_plan(self) -> None:
         try:
             cfg = self.build_config()
-            r = Run(json.dumps(cfg), load_leaderboard=False)
+            save = self.save.isChecked()
+            r = Run(json.dumps(cfg), load_leaderboard=save)
             per_round = len(r.schedule(0))
             seats = len(r.schedule(0)[0]) if per_round else 0
             total = per_round * r.n_rounds
             hands = total * r.hands_per_table
-            n_py = sum(r.python_bots)
+            saved = self.saved_ratings() if save else {}
+            starts, n_saved = [], 0
+            for key, rating, anchor in zip(r.keys, r.initial_ratings, r.anchors):
+                if anchor is not None:
+                    starts.append((rating, "anchor"))
+                elif key in saved:
+                    starts.append((rating, "saved"))
+                    n_saved += 1
+                else:
+                    starts.append((rating, "initial"))
+            self.players.set_start_elos(starts)
+            n_anchor = sum(a is not None for a in r.anchors)
+            extra = []
+            if n_anchor:
+                extra.append(f"{n_anchor} anchored")
+            if save:
+                extra.append(f"{n_saved} continue from saved Elo")
             self.plan.setText(
-                f"<b>{len(cfg['bots'])}</b> bots ({n_py} Python) · <b>{seats}</b> players/table · "
-                f"<b>{per_round}</b> tables/round · <b>{total:,}</b> tables · "
-                f"{'up to ' if r.is_tournament else ''}<b>{hands:,}</b> hands")
+                f"<b>{len(cfg['bots'])}</b> bots{' (' + ', '.join(extra) + ')' if extra else ''} · "
+                f"<b>{seats}</b> players/table · <b>{per_round}</b> tables/round · "
+                f"<b>{total:,}</b> tables · {'up to ' if r.is_tournament else ''}<b>{hands:,}</b> hands")
             self.run_btn.setEnabled(self.job is None or self.job.state not in ("running", "stopping"))
         except Exception as e:  # noqa: BLE001 - shown to the user
             msg = str(e).splitlines()[0] if str(e) else type(e).__name__
             self.plan.setText(f"<span style='color:#d32f2f'>{msg}</span>")
+            self.players.set_start_elos(None)
             self.run_btn.setEnabled(False)
 
     def set_editing(self, enabled: bool) -> None:
@@ -660,32 +708,37 @@ class ArenaWindow(QMainWindow):
 
     def show_result(self, res) -> None:
         tour = res.tournament
-        cols = ["#", "Bot", "Type", "Elo", "ΔElo", "Hands", "bb/100", "±95% CI", "VPIP", "PFR",
+        cols = ["#", "Bot", "Elo", "ΔElo", "Hands", "bb/100", "±95% CI", "VPIP", "PFR",
                 "Showdown", "Illegal", "µs/decision"] + (["Avg place"] if tour else [])
         self.board.setColumnCount(len(cols))
         self.board.setHorizontalHeaderLabels(cols)
         self.board.setRowCount(len(res.rows))
         green, red = QBrush(QColor("#2e7d32")), QBrush(QColor("#c62828"))
+        muted = QBrush(QColor("#7a7a7a"))
         bold = QFont()
         bold.setBold(True)
         for i, x in enumerate(res.rows):
-            kind = self._kinds_by_key.get(x["key"].split("@")[0], "")
             ci = x.get("ci95")
+            anchored = bool(x.get("anchored"))
             vals = [
-                str(i + 1), x["key"], "Python" if kind.startswith("python:") else "Rust",
-                f"{x['rating']:.1f}", f"{x['rating_change']:+.1f}", f"{x['hands']:,}",
+                str(i + 1), x["key"] + ("  (anchor)" if anchored else ""),
+                f"{x['rating']:.1f}", "—" if anchored else f"{x['rating_change']:+.1f}",
+                f"{x['hands']:,}",
                 f"{x['bb_per_100']:+.1f}", "–" if ci is None else f"±{ci:.1f}",
                 f"{100 * x['vpip']:.1f}%", f"{100 * x['pfr']:.1f}%", f"{100 * x['showdown']:.1f}%",
                 str(x["illegal"]), f"{x['mean_decision_us']:.2f}",
             ] + ([f"{x['avg_place']:.2f}"] if tour else [])
             for j, v in enumerate(vals):
                 it = QTableWidgetItem(v)
-                if j >= 3:
+                if j >= 2:
                     it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if j in (4, 6):
-                    val = x["rating_change"] if j == 4 else x["bb_per_100"]
-                    if val:
-                        it.setForeground(green if val > 0 else red)
+                if j == 3 and not anchored and x["rating_change"]:
+                    it.setForeground(green if x["rating_change"] > 0 else red)
+                if j == 5 and x["bb_per_100"]:
+                    it.setForeground(green if x["bb_per_100"] > 0 else red)
+                if anchored and j in (1, 2):
+                    it.setForeground(muted)
+                    it.setToolTip("Anchored: this Elo is fixed and pins the rating scale.")
                 if i == 0:
                     it.setFont(bold)
                 self.board.setItem(i, j, it)
@@ -696,6 +749,8 @@ class ArenaWindow(QMainWindow):
                 f"({_fmt_rate(res.hands / max(res.elapsed, 1e-9))} hands/s).")
         if res.results_dir:
             line += f" Saved to {res.results_dir}; leaderboard updated."
+        if res.replays_dir:
+            line += f" Hand replays: {res.replays_dir}."
         self.saved.setText(line)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API

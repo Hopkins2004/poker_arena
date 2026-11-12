@@ -13,6 +13,7 @@ pub mod hand_history;
 pub mod leaderboard;
 pub mod matchmaking;
 pub mod rating;
+pub mod replays;
 pub mod runner;
 pub mod stats;
 pub mod table;
@@ -26,6 +27,6 @@ pub use runner::{
 };
 pub use stats::SeatStats;
 pub use table::{
-    run_table, run_table_with_hooks, BlindLevel, Blinds, IllegalActionPolicy, SeatResult,
-    StackPolicy, TableConfig, TableError, TableHooks, TableMode, TableResult,
+    run_table, run_table_with_hooks, BlindLevel, Blinds, IllegalActionPolicy, RecordedHand,
+    SeatResult, StackPolicy, TableConfig, TableError, TableHooks, TableMode, TableResult,
 };

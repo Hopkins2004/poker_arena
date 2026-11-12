@@ -18,6 +18,11 @@
 //!
 //! Deltas are accumulated over the whole round and applied once at round end, so the result
 //! does not depend on table order. The update is symmetric per pair, hence zero-sum.
+//!
+//! **Anchors.** A bot can be anchored at a fixed rating ([`PairwiseElo::anchor`]): it still
+//! enters every expected-score computation, but its own rating never changes. Anchors pin the
+//! scale (e.g. random = 850, calling station = 400, tight-aggressive = 1300), so ratings stay
+//! comparable across runs and leaderboards. With anchors the system is no longer zero-sum.
 
 use crate::table::TableResult;
 use serde::{Deserialize, Serialize};
@@ -134,6 +139,7 @@ pub struct PairwiseElo {
     cfg: RatingConfig,
     ratings: Vec<f64>,
     pending: Vec<f64>,
+    fixed: Vec<bool>,
 }
 
 impl PairwiseElo {
@@ -144,7 +150,19 @@ impl PairwiseElo {
             cfg,
             ratings: initial,
             pending: vec![0.0; n],
+            fixed: vec![false; n],
         }
+    }
+
+    /// Fixes `bot`'s rating at `rating` for good (see the module docs on anchors).
+    pub fn anchor(&mut self, bot: usize, rating: f64) {
+        self.ratings[bot] = rating;
+        self.fixed[bot] = true;
+    }
+
+    /// True if `bot` is anchored.
+    pub fn is_anchored(&self, bot: usize) -> bool {
+        self.fixed[bot]
     }
 
     /// Expected score of a player rated `ra` against one rated `rb`.
@@ -200,8 +218,15 @@ impl RatingSystem for PairwiseElo {
     }
 
     fn end_round(&mut self) {
-        for (r, p) in self.ratings.iter_mut().zip(&mut self.pending) {
-            *r += *p;
+        for ((r, p), fixed) in self
+            .ratings
+            .iter_mut()
+            .zip(&mut self.pending)
+            .zip(&self.fixed)
+        {
+            if !fixed {
+                *r += *p;
+            }
             *p = 0.0;
         }
     }
@@ -233,6 +258,7 @@ mod tests {
             bb: 2,
             tournament,
             hand_history: None,
+            recorded_hands: Vec::new(),
             seats: seats
                 .iter()
                 .enumerate()
@@ -366,6 +392,23 @@ mod tests {
         )));
         e.end_round();
         assert!((e.ratings().iter().sum::<f64>() - 4550.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn anchored_bots_never_move_but_set_expectations() {
+        let mut e = PairwiseElo::new(RatingConfig::default(), vec![1500.0, 1300.0, 400.0]);
+        e.anchor(1, 1300.0);
+        e.anchor(2, 400.0);
+        e.begin_round();
+        // Bot 0 loses to the 1300 anchor and beats the 400 anchor.
+        e.add_table(&table(&[(0, 0.0), (1, 5.0), (2, -5.0)]));
+        e.end_round();
+        assert_eq!(&e.ratings()[1..], &[1300.0, 400.0]);
+        let e01 = PairwiseElo::expected(1500.0, 1300.0);
+        let e02 = PairwiseElo::expected(1500.0, 400.0);
+        let d0 = 16.0 / 2.0 * ((0.0 - e01) + (1.0 - e02));
+        assert!((e.ratings()[0] - 1500.0 - d0).abs() < 1e-9);
+        assert!(e.is_anchored(1) && !e.is_anchored(0));
     }
 
     #[test]

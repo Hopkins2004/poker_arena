@@ -1,10 +1,9 @@
-"""``pokerarena.run``: run a configured tournament with Rust and Python bots (blocking).
+"""``pokerarena.run``: run a configured tournament of Python bots (blocking).
 
-Rust-only tables run inside the Rust engine on a thread pool with the GIL released. Tables
-that seat a Python bot are partitioned over a ``multiprocessing`` pool; each worker calls into
-Rust for its tables and returns serialized results, which the parent merges in table-id order
+Tables are partitioned over a ``multiprocessing`` pool; each worker plays its tables through
+the Rust engine and returns serialized results, which the parent merges in table-id order
 before applying the round's rating update. On a free-threaded CPython (3.13t+)
-``threaded=True`` runs Python tables on threads instead. See :mod:`pokerarena.job` for the
+``threaded=True`` runs tables on threads instead. See :mod:`pokerarena.job` for the
 controllable (background, stoppable) version used by the GUI.
 """
 
@@ -32,6 +31,7 @@ def run(
     save: bool = True,
     leaderboard: Optional[Union[str, os.PathLike]] = None,
     results_dir: Optional[Union[str, os.PathLike]] = None,
+    replays_dir: Optional[Union[str, os.PathLike]] = None,
 ) -> RunResult:
     """Run the tournament described by ``config`` (a TOML path, TOML/JSON text or a dict).
 
@@ -42,7 +42,8 @@ def run(
         seed, rounds, threads: override the config.
         fresh: ignore stored ratings for these bots.
         save: write ``results/<run_id>/`` and update the leaderboard file.
-        leaderboard, results_dir: override the config's paths.
+        leaderboard, results_dir, replays_dir: override the config's paths. Hand replays
+            are written when the config sets ``[run] replay_hands_per_bot``.
 
     Results are identical for any ``processes``/``threads`` value.
     """
@@ -53,5 +54,6 @@ def run(
 
     job = ArenaJob(config, processes=processes, threaded=threaded, seed=seed, rounds=rounds,
                    threads=threads, fresh=fresh, save=save, leaderboard=leaderboard,
-                   results_dir=results_dir, on_round=None if quiet else report)
+                   results_dir=results_dir, replays_dir=replays_dir,
+                   on_round=None if quiet else report)
     return job.run()

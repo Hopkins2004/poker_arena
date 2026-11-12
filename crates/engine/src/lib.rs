@@ -8,6 +8,7 @@
 pub mod action;
 pub mod card;
 pub mod deck;
+pub mod equity;
 pub mod eval;
 pub mod format;
 pub mod rng;

@@ -23,13 +23,18 @@ score_mode = "margin"
 margin_c = 30
 
 [[bots]]
-name = "tag"
-kind = "tag"
-
-[[bots]]
 name = "random"
-kind = "random"
+kind = "python:pokerarena.baselines.RandomLegal"
+params = { fold = 1.0, call = 2.0, raise = 1.0, raise_sizes = [0.5, 1.0] }
+anchor = 850
 
 [[bots]]
 name = "station"
-kind = "calling_station"
+kind = "python:pokerarena.baselines.CallingStation"
+anchor = 400
+
+[[bots]]
+name = "tag"
+kind = "python:pokerarena.baselines.TightAggressive"
+params = { samples = 300 }
+anchor = 1300

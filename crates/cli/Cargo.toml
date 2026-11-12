@@ -12,10 +12,8 @@ path = "src/main.rs"
 [dependencies]
 engine = { path = "../engine" }
 arena = { path = "../arena" }
-bots = { path = "../bots" }
 # Pinned: the registry index currently lacks a clap_derive release matching clap 4.6.7.
 clap = { version = "=4.6.1", features = ["derive"] }
 rayon = "1.12.0"
-serde_json = "1.0.154"
 rand_xoshiro = "0.8"
 

@@ -1,9 +1,9 @@
 //! Monte Carlo equity against random opponent hands.
 
-use engine::eval::{Evaluator, HandAcc};
-use engine::format::Variant;
-use engine::rng::below;
-use engine::{Card, CardMask};
+use crate::card::{Card, CardMask};
+use crate::eval::{Evaluator, HandAcc};
+use crate::format::Variant;
+use crate::rng::below;
 use rand_core::Rng;
 
 /// Estimates the equity (win probability, ties split) of `hole` with the visible `board`
@@ -88,7 +88,7 @@ pub fn equity<R: Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::card::parse_cards;
+    use crate::card::parse_cards;
     use rand_xoshiro::rand_core::SeedableRng;
     use rand_xoshiro::Xoshiro256PlusPlus;
 

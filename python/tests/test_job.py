@@ -11,6 +11,8 @@ import pytest
 
 import pokerarena as pa
 
+PY = "python:pokerarena.baselines."
+
 BASE = """
 [run]
 rounds = 3
@@ -22,17 +24,20 @@ max_seats = 6
 hands_per_table = {hands}
 blinds = {{ sb = 1, bb = 2 }}
 """
-RUST_BOTS = """
+BASE_BOTS = """
 [[bots]]
 name = "tag"
-kind = "tag"
+kind = "python:pokerarena.baselines.TightAggressive"
 params = { samples = 50 }
+anchor = 1300
 [[bots]]
 name = "random"
-kind = "random"
+kind = "python:pokerarena.baselines.RandomLegal"
+anchor = 850
 [[bots]]
 name = "station"
-kind = "calling_station"
+kind = "python:pokerarena.baselines.CallingStation"
+anchor = 400
 """
 PY_BOTS = """
 [[bots]]
@@ -45,8 +50,14 @@ kind = "python:pokerarena.baselines.CallingStation"
 """
 
 
-def cfg(hands, py=True, extra=""):
-    return BASE.format(hands=hands) + RUST_BOTS + (PY_BOTS if py else "") + extra
+REPLAYS = ""  # appended bot TOML (none); replays are enabled through the [run] section
+
+
+def cfg(hands, py=True, extra="", replays=0):
+    base = BASE.format(hands=hands)
+    if replays:
+        base = base.replace("seed = 5", f"seed = 5\nreplay_hands_per_bot = {replays}")
+    return base + BASE_BOTS + (PY_BOTS if py else "") + extra
 
 
 def children():
@@ -107,11 +118,12 @@ def test_completes_with_exact_progress():
     assert job.result.rows and job.result.hands == p.hands_total
 
 
-def test_stop_rust_only_is_immediate(tmp_path):
+def test_stop_is_fast_and_writes_nothing(tmp_path):
     before = baseline()
     lb = tmp_path / "lb.json"
-    job = pa.ArenaJob(cfg(5_000_000, py=False), save=True, leaderboard=lb,
-                      results_dir=tmp_path / "results")
+    job = pa.ArenaJob(cfg(5_000_000, py=False, replays=100), save=True, leaderboard=lb,
+                      results_dir=tmp_path / "results", replays_dir=tmp_path / "replays",
+                      processes=3)
     job.start()
     wait_for(lambda: job.progress().hands_done > 5000)
     t0 = time.perf_counter()
@@ -119,11 +131,12 @@ def test_stop_rust_only_is_immediate(tmp_path):
     assert job.wait(5)
     latency = time.perf_counter() - t0
     assert job.state == "stopped" and job.result is None and job.error is None
-    assert latency < 0.5, latency
+    assert latency < 3.0, latency
     n = job.progress().hands_done
     time.sleep(0.1)
     assert job.progress().hands_done == n, "hands kept running after stop"
     assert not lb.exists() and not (tmp_path / "results").exists(), "a stopped run wrote files"
+    assert not (tmp_path / "replays").exists(), "a stopped run wrote hand replays"
     assert_no_leak(before)
 
 
@@ -219,3 +232,37 @@ def test_worker_crash_fails_fast_instead_of_hanging():
     assert job.state == "error"
     assert "worker process died" in str(job.error) and "exit code 3" in str(job.error)
     assert_no_leak(before)
+
+
+def test_hand_replays_written_per_bot(tmp_path):
+    job = pa.ArenaJob(cfg(300, replays=25), save=False, processes=2,
+                      replays_dir=tmp_path / "replays")
+    res = job.run()
+    d = tmp_path / "replays" / job.run_id
+    assert res.replays_dir == str(d)
+    files = sorted(p.name for p in d.iterdir())
+    assert files == sorted(f"{k}.txt" for k in job.keys)
+    for k in job.keys:
+        text = (d / f"{k}.txt").read_text()
+        assert text.count("### Round") == 25, k
+        assert text.count("Hand #") == 25
+        # Every sampled hand involves that bot.
+        for hand in text.split("### Round")[1:]:
+            assert f": {k} (" in hand, (k, hand[:200])
+    # Replays don't change results.
+    plain = pa.ArenaJob(cfg(300), save=False, processes=2).run()
+    assert plain.rows == res.rows
+
+
+def test_saved_ratings_are_reused_except_anchors(tmp_path):
+    lb = tmp_path / "lb.json"
+    first = pa.ArenaJob(cfg(200), save=True, leaderboard=lb, results_dir=tmp_path / "r",
+                        processes=2).run()
+    job2 = pa.ArenaJob(cfg(200), save=True, leaderboard=lb, results_dir=tmp_path / "r",
+                       processes=2)
+    for key, start in job2.initial_ratings.items():
+        assert start == first.ratings[key], key
+    assert (job2.initial_ratings["tag"], job2.initial_ratings["random"],
+            job2.initial_ratings["station"]) == (1300, 850, 400)
+    fresh = pa.ArenaJob(cfg(200), save=False, processes=2)
+    assert fresh.initial_ratings["py_tag"] == 1500

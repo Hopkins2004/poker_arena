@@ -10,6 +10,7 @@
 use arena::bot::{Action, Bot, HandResult, HandStart, MatchInfo, Observation, PublicEvent};
 use arena::config::ConfigFile;
 use arena::leaderboard::{render, utc_timestamp, write_results_dir};
+use arena::replays::{write_replays, ReplayPlan};
 use arena::runner::{build_pool, table_error, table_seed, RoundRecord, RunError};
 use arena::{
     run_table_with_hooks, BotFactory, LeaderboardFile, RunProgress, RunSpec, RunState, TableHooks,
@@ -534,6 +535,9 @@ pub struct PyRun {
     lb_path: PathBuf,
     lb: LeaderboardFile,
     progress: RunProgress,
+    replay_plan: ReplayPlan,
+    initial_ratings: Vec<f64>,
+    run_id: String,
 }
 
 create_exception!(
@@ -598,19 +602,17 @@ impl PyRun {
         let mut factories = Vec::new();
         let mut is_python = Vec::new();
         for b in &cfg.bots {
-            match b.python_target() {
-                Some(t) => {
-                    factories.push(python_factory(py, &b.name, t, &b.params)?);
-                    is_python.push(true);
-                }
-                None => {
-                    factories.push(
-                        bots::factory(&b.kind, &b.name, &b.params)
-                            .map_err(|e| err(format!("bot `{}`: {e}", b.name)))?,
-                    );
-                    is_python.push(false);
-                }
-            }
+            // All bots are Python bots (the Rust baseline bots were removed; their Python
+            // ports live in pokerarena.baselines).
+            let Some(t) = b.python_target() else {
+                return Err(err(format!(
+                    "bot `{}`: kind `{}` is not a Python bot. Use python:module.ClassName, e.g. \
+                     python:pokerarena.baselines.TightAggressive / RandomLegal / CallingStation",
+                    b.name, b.kind
+                )));
+            };
+            factories.push(python_factory(py, &b.name, t, &b.params)?);
+            is_python.push(true);
         }
         let keys: Vec<String> = cfg.bots.iter().map(|b| b.key()).collect();
         let lb_path = leaderboard.unwrap_or_else(|| PathBuf::from(&cfg.run.leaderboard));
@@ -625,7 +627,12 @@ impl PyRun {
             }
         }
         let initial = lb.initial_ratings(&keys, spec.rating.initial);
-        let state = RunState::new(spec.clone(), keys, initial).map_err(err)?;
+        let mut state = RunState::new(spec.clone(), keys, initial).map_err(err)?;
+        let anchors: Vec<Option<f64>> = cfg.bots.iter().map(|b| b.anchor).collect();
+        state.set_anchors(&anchors).map_err(err)?;
+        let replay_plan = state.replay_plan().map_err(err)?;
+        let initial_ratings = state.ratings().to_vec();
+        let run_id = format!("{}-s{}", utc_timestamp(), spec.seed);
         Ok(PyRun {
             cfg_text: config_text,
             cfg,
@@ -637,6 +644,9 @@ impl PyRun {
             lb_path,
             lb,
             progress: RunProgress::hidden(),
+            replay_plan,
+            initial_ratings,
+            run_id,
         })
     }
 
@@ -664,6 +674,45 @@ impl PyRun {
     #[getter]
     fn ratings(&self) -> Vec<f64> {
         self.state.ratings().to_vec()
+    }
+    /// Starting rating of each bot (config order): its anchor, else its stored leaderboard
+    /// rating (when loaded), else the configured initial rating.
+    #[getter]
+    fn initial_ratings(&self) -> Vec<f64> {
+        self.initial_ratings.clone()
+    }
+    /// Anchor of each bot (config order), or None.
+    #[getter]
+    fn anchors(&self) -> Vec<Option<f64>> {
+        self.cfg.bots.iter().map(|b| b.anchor).collect()
+    }
+    /// Id of this run (used for results/ and hand_replays/ folders).
+    #[getter]
+    fn run_id(&self) -> String {
+        self.run_id.clone()
+    }
+    /// Hands per bot sampled for hand replays (0 = off).
+    #[getter]
+    fn replay_hands_per_bot(&self) -> usize {
+        self.spec.replay_hands_per_bot
+    }
+    /// Writes `<replays_dir>/<run_id>/<bot>.txt` (sampled hands of every bot) after the
+    /// last round. Returns the folder, or None when replays are off.
+    #[pyo3(signature = (replays_dir=None))]
+    fn write_replays(&self, replays_dir: Option<PathBuf>) -> PyResult<Option<String>> {
+        if self.spec.replay_hands_per_bot == 0 {
+            return Ok(None);
+        }
+        let base = replays_dir.unwrap_or_else(|| PathBuf::from(&self.cfg.run.replays_dir));
+        let dir = write_replays(
+            &base,
+            &self.run_id,
+            self.state.keys(),
+            &self.replay_plan,
+            &self.rounds,
+        )
+        .map_err(err)?;
+        Ok(Some(dir.display().to_string()))
     }
     /// True for tournament runs.
     #[getter]
@@ -745,6 +794,7 @@ impl PyRun {
         let spec = &self.spec;
         let factories = &self.factories;
         let progress = &self.progress;
+        let replay_plan = &self.replay_plan;
         let has_python = table_ids
             .iter()
             .any(|&t| schedule.tables[t].iter().any(|&b| self.is_python[b]));
@@ -766,6 +816,7 @@ impl PyRun {
                 hands_done: Some(&progress.hands_done),
                 cancel: Some(&progress.cancel),
                 on_hand,
+                record: (!replay_plan.is_empty()).then(|| replay_plan.record_for(round, t)),
             };
             run_table_with_hooks(
                 &spec.format,
@@ -849,7 +900,7 @@ impl PyRun {
     #[pyo3(signature = (results_dir=None, save_leaderboard=true))]
     fn finish(&mut self, results_dir: Option<PathBuf>, save_leaderboard: bool) -> PyResult<String> {
         let rows = self.state.rows();
-        let run_id = format!("{}-s{}", utc_timestamp(), self.spec.seed);
+        let run_id = self.run_id.clone();
         let base = results_dir.unwrap_or_else(|| PathBuf::from(&self.cfg.run.results_dir));
         let dir = write_results_dir(
             &base,
@@ -930,7 +981,7 @@ fn equity(
     }
     Ok(py.detach(|| {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-        bots::equity::equity(
+        engine::equity::equity(
             Evaluator::get(),
             v,
             &hole,
@@ -981,12 +1032,6 @@ fn hand_category(strength: u16) -> PyResult<String> {
     Ok(format!("{:?}", category(strength)))
 }
 
-/// Names of the registered Rust bot kinds.
-#[pyfunction]
-fn rust_bot_kinds() -> Vec<&'static str> {
-    bots::KINDS.to_vec()
-}
-
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAction>()?;
@@ -999,7 +1044,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_cards, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate, m)?)?;
     m.add_function(wrap_pyfunction!(hand_category, m)?)?;
-    m.add_function(wrap_pyfunction!(rust_bot_kinds, m)?)?;
     m.add(
         "STREETS",
         PyTuple::new(m.py(), ["preflop", "flop", "turn", "river"])?,

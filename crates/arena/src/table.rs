@@ -209,6 +209,18 @@ pub struct TableResult {
     /// Text hand history, if enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand_history: Option<String>,
+    /// Hands captured through [`TableHooks::record`], in hand order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recorded_hands: Vec<RecordedHand>,
+}
+
+/// One captured hand history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordedHand {
+    /// Hand number within the table.
+    pub hand_id: u64,
+    /// PokerStars-like text.
+    pub text: String,
 }
 
 /// Errors from running a table.
@@ -268,6 +280,7 @@ struct Table<'a> {
     hh: Option<HandHistoryWriter>,
     names: Vec<String>,
     hooks: TableHooks<'a>,
+    recorded: Vec<RecordedHand>,
 }
 
 /// Plays a table. `seats[i]` is the index into `factories` of the bot in seat `i`.
@@ -295,6 +308,9 @@ pub struct TableHooks<'a> {
     pub cancel: Option<&'a AtomicBool>,
     /// Called after every finished hand (after `hands_done` is incremented).
     pub on_hand: Option<&'a (dyn Fn() + Sync)>,
+    /// Sorted hand ids whose text hand history is captured into
+    /// [`TableResult::recorded_hands`] (used for hand replays).
+    pub record: Option<&'a [u64]>,
 }
 
 /// [`run_table`] with progress reporting and cooperative cancellation (see [`TableHooks`]).
@@ -338,6 +354,7 @@ pub fn run_table_with_hooks(
         hh: cfg.hand_history.then(HandHistoryWriter::new),
         names,
         hooks,
+        recorded: Vec::new(),
     };
 
     let start = cfg.starting_stack();
@@ -393,6 +410,7 @@ pub fn run_table_with_hooks(
         tournament: cfg.is_tournament(),
         seats: seats_out,
         hand_history: t.hh.map(|h| h.finish()),
+        recorded_hands: t.recorded,
     })
 }
 
@@ -677,6 +695,25 @@ impl Table<'_> {
                 }
             });
             hh.write_hand(hand_id, st, setup, &names[..n]);
+        }
+        if self
+            .hooks
+            .record
+            .is_some_and(|r| r.binary_search(&hand_id).is_ok())
+        {
+            let names: [&str; MAX_SEATS] = std::array::from_fn(|s| {
+                if s < n {
+                    self.names[map[s]].as_str()
+                } else {
+                    ""
+                }
+            });
+            let mut w = HandHistoryWriter::new();
+            w.write_hand(hand_id, &self.st, setup, &names[..n]);
+            self.recorded.push(RecordedHand {
+                hand_id,
+                text: w.finish(),
+            });
         }
         if let Some(p) = self.hooks.hands_done {
             p.fetch_add(1, Ordering::Relaxed);

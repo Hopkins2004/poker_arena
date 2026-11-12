@@ -5,6 +5,8 @@ import pytest
 
 import pokerarena as pa
 
+PY = "python:pokerarena.baselines."
+
 MIXED = """
 [run]
 rounds = 2
@@ -21,16 +23,19 @@ blinds = { sb = 1, bb = 2 }
 
 [[bots]]
 name = "tag"
-kind = "tag"
+kind = "python:pokerarena.baselines.TightAggressive"
 params = { samples = 50 }
+anchor = 1300
 
 [[bots]]
-name = "rust_random"
-kind = "random"
+name = "base_random"
+kind = "python:pokerarena.baselines.RandomLegal"
+anchor = 850
 
 [[bots]]
 name = "station"
-kind = "calling_station"
+kind = "python:pokerarena.baselines.CallingStation"
+anchor = 400
 
 [[bots]]
 name = "py_random"
@@ -63,25 +68,27 @@ def test_mixed_run_deterministic_across_processes():
     assert _canon(a) == _canon(b) == _canon(c)
     assert a.ratings == b.ratings
     keys = {r["key"] for r in a.rows}
-    assert keys == {"tag", "rust_random", "station", "py_random", "py_equity", "spy"}
+    assert keys == {"tag", "base_random", "station", "py_random", "py_equity", "spy"}
     for r in a.rows:
         assert r["illegal"] == 0, r
         assert r["hands"] > 0
-    assert abs(sum(a.ratings.values()) - 6 * 1500) < 1e-6
+    assert (a.ratings["tag"], a.ratings["base_random"], a.ratings["station"]) == (1300, 850, 400)
 
 
 def test_different_seed_differs():
     assert _canon(_run(processes=2)) != _canon(_run(processes=2, seed=18))
 
 
-def test_python_and_rust_tables_split():
+def test_all_tables_are_python_tables():
     r = pa.Run(MIXED, load_leaderboard=False)
-    sched = r.schedule(0)
-    py = set(r.python_tables(0))
-    assert py, "some tables must contain Python bots"
-    for t, seats in enumerate(sched):
-        has_py = any(r.python_bots[b] for b in seats)
-        assert has_py == (t in py)
+    assert all(r.python_bots)
+    assert r.python_tables(0) == list(range(len(r.schedule(0))))
+
+
+def test_rust_bot_kinds_are_rejected():
+    with pytest.raises(ValueError, match="not a Python bot"):
+        pa.Run(MIXED.replace(f'kind = "{PY}CallingStation"', 'kind = "calling_station"'),
+               load_leaderboard=False)
 
 
 def test_threaded_falls_back_on_gil_build():
@@ -94,13 +101,6 @@ def test_threaded_falls_back_on_gil_build():
             res = _run(threaded=True, processes=2)
         assert any("free-threaded" in str(x.message) for x in w)
         assert _canon(res) == _canon(_run(processes=1))
-
-
-def test_rust_only_run_threads_identical():
-    cfg = MIXED.split("[[bots]]\nname = \"py_random\"")[0]
-    a = pa.run(cfg, save=False, quiet=True, threads=1)
-    b = pa.run(cfg, save=False, quiet=True, threads=8)
-    assert _canon(a) == _canon(b)
 
 
 def test_exceptions_count_as_illegal_actions():

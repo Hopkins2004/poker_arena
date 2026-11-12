@@ -1,4 +1,4 @@
-"""pokerarena: run poker bots (Rust and Python) against each other.
+"""pokerarena: run Python poker bots against each other on a Rust engine.
 
 Quick start::
 
@@ -6,9 +6,10 @@ Quick start::
     result = pokerarena.run("configs/6max_nlh.toml")
     print(result.table)
 
-Python bots implement :class:`pokerarena.Bot` (only ``act`` is required) and are referenced
-from a config as ``kind = "python:module.ClassName"``. They are constructed as
-``ClassName(seed=<int>, **params)``.
+All bots are Python bots. They implement :class:`pokerarena.Bot` (only ``act`` is required)
+and are referenced from a config as ``kind = "python:module.ClassName"``; they are
+constructed as ``ClassName(seed=<int>, **params)``. Baselines: :mod:`pokerarena.baselines`.
+See BOTS.md for the full bot-author guide.
 """
 
 from ._native import (
@@ -23,7 +24,6 @@ from ._native import (
     evaluate,
     hand_category,
     parse_cards,
-    rust_bot_kinds,
 )
 from .bot import BaseBot, Bot
 from .job import ArenaJob, Progress, RunResult, is_free_threaded
@@ -48,5 +48,4 @@ __all__ = [
     "is_free_threaded",
     "parse_cards",
     "run",
-    "rust_bot_kinds",
 ]

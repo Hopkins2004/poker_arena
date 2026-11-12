@@ -11,3 +11,4 @@ __pycache__/
 /leaderboard_trio.json
 /.poker_arena.log
 .DS_Store
+/hand_replays/

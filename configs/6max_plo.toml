@@ -14,19 +14,18 @@ starting_stack_bb = 100
 blinds = { sb = 1, bb = 2 }
 
 [[bots]]
-name = "tag_plo"
-kind = "tag"
-params = { samples = 150 }
-
-[[bots]]
 name = "random"
-kind = "random"
-
-[[bots]]
-name = "random_aggro"
-kind = "random"
-params = { fold = 1, call = 1, raise = 2, raise_sizes = [0.5, 1.0] }
+kind = "python:pokerarena.baselines.RandomLegal"
+params = { fold = 1.0, call = 2.0, raise = 1.0, raise_sizes = [0.5, 1.0] }
+anchor = 850
 
 [[bots]]
 name = "station"
-kind = "calling_station"
+kind = "python:pokerarena.baselines.CallingStation"
+anchor = 400
+
+[[bots]]
+name = "tag"
+kind = "python:pokerarena.baselines.TightAggressive"
+params = { samples = 150 }
+anchor = 1300

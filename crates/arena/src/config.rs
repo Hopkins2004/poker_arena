@@ -34,7 +34,8 @@
 //! [[bots]]
 //! name = "tag"
 //! version = "1"                     # optional
-//! kind = "tag"                      # a registered Rust bot, or "python:module.ClassName"
+//! kind = "python:pokerarena.baselines.TightAggressive"   # python:module.ClassName
+//! anchor = 1300                     # optional fixed Elo
 //! params = { samples = 300 }
 //! ```
 
@@ -59,6 +60,10 @@ pub struct RunSection {
     pub results_dir: String,
     /// Persistent leaderboard file.
     pub leaderboard: String,
+    /// Random hands per bot saved as hand replays (0 = off).
+    pub replay_hands_per_bot: usize,
+    /// Directory for hand replays (`<dir>/<run_id>/<bot>.txt`).
+    pub replays_dir: String,
 }
 
 impl Default for RunSection {
@@ -69,6 +74,8 @@ impl Default for RunSection {
             threads: None,
             results_dir: "results".into(),
             leaderboard: "leaderboard.json".into(),
+            replay_hands_per_bot: 0,
+            replays_dir: "hand_replays".into(),
         }
     }
 }
@@ -170,6 +177,9 @@ pub struct BotSection {
     /// Arbitrary parameters passed to the factory.
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Fixed Elo rating: the bot is an anchor and its rating never changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<f64>,
 }
 
 impl BotSection {
@@ -309,6 +319,7 @@ impl ConfigFile {
             rounds: self.run.rounds,
             seed: self.run.seed,
             threads: self.run.threads,
+            replay_hands_per_bot: self.run.replay_hands_per_bot,
         })
     }
 }

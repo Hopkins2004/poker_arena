@@ -1,10 +1,10 @@
-"""Python ports of the Rust baseline bots (crates/bots), for comparing Rust and Python bots.
+"""The baseline bots: tight-aggressive, random-legal and calling station.
 
-The decision logic mirrors the Rust code line for line and takes the same params, so a
-config can switch ``kind = "tag"`` to ``kind = "python:pokerarena.baselines.TightAggressive"``
-without other changes (``examples.baselines`` re-exports this module). Random streams differ (Python's ``random`` vs Xoshiro256++), so
-results agree statistically, not bit-for-bit. ``TightAggressive`` uses the Rust-backed
-``pokerarena.equity`` for its Monte Carlo equity, just as the Rust bot does.
+They are the arena's reference opponents and are anchored at fixed Elo ratings in the shipped
+configs and the desktop app (random 850, calling station 400, tight-aggressive 1300). Use
+them as ``kind = "python:pokerarena.baselines.TightAggressive"`` (or ``RandomLegal``,
+``CallingStation``). ``TightAggressive`` uses the Rust-backed ``pokerarena.equity`` for its
+Monte Carlo equity. ``examples.baselines`` re-exports this module.
 """
 
 import math
@@ -20,7 +20,7 @@ def _clamp_raise(la, to):
 
 
 def _pot_fraction_to(obs, frac):
-    # Rust's f64::round rounds half away from zero (Python's round() is banker's rounding).
+    # Round half away from zero (Python's round() is banker's rounding).
     return obs.current_bet + math.floor((obs.pot + obs.legal.call_amount) * frac + 0.5)
 
 
@@ -34,7 +34,7 @@ class CallingStation(BaseBot):
 class RandomLegal(BaseBot):
     """Random fold / call / raise with weights and pot-fraction raise sizes.
 
-    Same params as the Rust ``random`` kind: ``fold``, ``call``, ``raise``, ``raise_sizes``.
+    Params: ``fold``, ``call``, ``raise`` (weights) and ``raise_sizes`` (pot fractions).
     """
 
     def __init__(self, seed=0, fold=1.0, call=2.0, raise_sizes=(0.5, 1.0), **kw):
@@ -84,7 +84,7 @@ def chen_score(a, b):
 class TightAggressive(BaseBot):
     """Chen-formula preflop, Monte Carlo equity postflop (and preflop in PLO).
 
-    Same params as the Rust ``tag`` kind: ``samples``, ``tightness``, ``call_margin``.
+    Params: ``samples``, ``tightness`` (added to preflop thresholds) and ``call_margin``.
     """
 
     def __init__(self, seed=0, samples=300, tightness=0.0, call_margin=0.05):

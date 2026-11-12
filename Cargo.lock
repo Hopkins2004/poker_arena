@@ -96,7 +96,6 @@ name = "arena_py"
 version = "0.1.0"
 dependencies = [
  "arena",
- "bots",
  "engine",
  "numpy",
  "pyo3",
@@ -159,18 +158,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "bots"
-version = "0.1.0"
-dependencies = [
- "arena",
- "criterion",
- "engine",
- "rand_core",
- "rand_xoshiro",
- "serde_json",
 ]
 
 [[package]]
@@ -296,12 +283,10 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "arena",
- "bots",
  "clap",
  "engine",
  "rand_xoshiro",
  "rayon",
- "serde_json",
 ]
 
 [[package]]

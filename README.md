@@ -2,16 +2,20 @@
 
 A high-throughput engine for running poker bots against each other: 6-max No-Limit Hold'em
 first, plus Pot-Limit Omaha and Fixed-Limit Hold'em. Tables run in parallel, matchmaking is
-configurable, and results feed a pairwise multiplayer Elo leaderboard. It is an evaluation
-harness for poker AI research. The priorities are rules and chip-accounting correctness
-first, speed second.
+configurable, and results feed a pairwise multiplayer Elo leaderboard anchored by three
+baseline bots. It is an evaluation harness for poker AI research. The priorities are rules
+and chip-accounting correctness first, speed second.
+
+The engine is Rust. **Bots are Python**: you write a class with an `act(obs)` method, and
+the Rust engine deals, enforces the rules, runs tables in parallel processes and rates the
+results. **[BOTS.md](BOTS.md) is the full bot-author guide.**
 
 ```
-crates/engine   cards, deck, hand evaluator, game rules, hand state machine (no I/O, no threads)
-crates/arena    Bot trait, table runner, stats, matchmaking, ratings, leaderboard, parallel runner, config
-crates/bots     baseline bots: random-legal, calling station, tight-aggressive; MC equity helper
-crates/cli      the `arena` binary: run, bench, leaderboard
-python/         PyO3 bindings (crate arena_py) + Python package `pokerarena` + example bots
+crates/engine   cards, deck, hand evaluator, equity, game rules, hand state machine (no I/O, no threads)
+crates/arena    Bot trait, table runner, stats, matchmaking, ratings, leaderboard, replays, config
+crates/cli      the `arena` binary: bench, leaderboard
+python/         PyO3 bindings (crate arena_py) + Python package `pokerarena` (baselines, runner, GUI)
+macos/          sources of the double-click app (Poker Arena.app)
 configs/        example TOML configs
 ```
 
@@ -32,25 +36,61 @@ System Settings › Privacy & Security › Files & Folders.
 
 - **Settings:** variant, seats, cash or tournament (blind levels are generated from your
   blinds), stack, blinds and ante, stack policy, duplicate mode, hands per table, rounds,
-  players per table, minimum tables per round, appearances, Elo mode and K, seed, Rust
-  threads, Python processes, decision timing, and saving.
-- **Players:** each row is a Rust bot, a Python port (`pokerarena.baselines`) or any
-  custom `module.ClassName`, with JSON params. Presets: Rust demo lineup,
-  **Python champions** (Python ports of the three top bots), Rust vs Python champions, and
-  the Python trio. A live preview shows tables per round and total hands.
+  players per table, minimum tables per round, Elo mode and K, seed, worker processes,
+  decision timing, saving, and hand replays.
+- **Players:** each row is a baseline bot (tight-aggressive, random, calling station) or
+  any custom `module.ClassName`, with JSON params and an optional **anchor Elo**. A
+  read-only **Start Elo** column shows where each bot begins: its anchor, its saved rating,
+  or the initial 1500. Presets: the demo lineup (7 bots), the three anchored baselines,
+  champions (the tag variants), and the trio. A live preview shows tables per round and
+  total hands.
+- **Save results & leaderboard:** bots start from their Elo in `leaderboard.json` when they
+  have one (anchors always win). At the end the app writes `results/<run_id>/` and updates
+  the leaderboard.
+- **Save 100 random hands per bot:** after the run, writes
+  `hand_replays/<run_id>/<bot>.txt`. Each file holds 100 hands drawn at random from all the
+  hands that bot played, as readable hand histories with every player's cards shown. Only
+  the sampled hands are recorded, so this costs no speed. It works independently of saving
+  results, and `hand_replays/` is not committed to git.
 - **Run** shows a hand-level progress bar with round, tables, hands/s and ETA, then the
-  leaderboard, marking each bot as Rust or Python.
-- **Stop** is a hard stop. Rust tables stop before their next hand (microseconds), Python
-  worker processes are killed (even a bot stuck in an infinite loop), and nothing is
-  written. Closing the window mid-run does the same. Tests check that a stopped run leaves
-  no worker processes, threads, file descriptors or semaphores behind, and that a crashed
-  worker fails the run instead of hanging it.
+  leaderboard, with anchored bots marked.
+- **Stop** is a hard stop. Worker processes are killed (even a bot stuck in an infinite
+  loop), and nothing is written. Closing the window mid-run does the same. Tests check that
+  a stopped run leaves no worker processes, threads, file descriptors or semaphores behind,
+  and that a crashed worker fails the run instead of hanging it.
 
 The app is a small AppleScript applet that runs `Contents/Resources/launch.sh`.
 `macos/build_app.sh` rebuilds it, and the log goes to `.poker_arena.log`. Without the app:
 `python/.venv/bin/python -c "from pokerarena.gui import main; main()"`.
 
-## Build, test, run
+## Running from Python
+
+```python
+import pokerarena as pa
+
+if __name__ == "__main__":          # required: worker processes re-import the main script
+    res = pa.run("configs/6max_nlh.toml", save=True)
+    print(res.table)
+```
+
+`pokerarena.run(config, processes=None, threaded=False, seed=None, rounds=None, fresh=False,
+save=True, leaderboard=None, results_dir=None, replays_dir=None)` returns
+`RunResult(rows, ratings, table, results_dir, replays_dir, hands, tables, elapsed)`.
+`config` is a TOML path, TOML or JSON text, or a dict. With `save=True` bots start from
+their stored ratings (unless `fresh=True`), and at the end the run writes
+`results/<run_id>/` (`config.toml`, `schedule.json`, `tables.jsonl`, `leaderboard.json`,
+`leaderboard.txt`) and updates `leaderboard.json`.
+
+`pokerarena.ArenaJob` is the controllable form: `start()` runs in the background,
+`progress()` returns a snapshot, `stop()` is the hard stop, and `wait()` waits for cleanup.
+
+Tables run in a `multiprocessing` pool of worker processes (`spawn`), one table per task.
+Each worker plays its tables through the Rust engine and reports hand-level progress, and
+the parent merges results in table-id order before updating ratings. On free-threaded
+CPython (3.13t+, GIL disabled), `threaded=True` runs tables on threads instead. Results
+are identical for any process or thread count.
+
+## Build and test
 
 ```sh
 cargo build --release
@@ -58,20 +98,15 @@ cargo test --workspace
 cargo test --workspace --release -- --ignored     # exhaustive C(52,7) evaluator enumeration (~1 s)
 cargo bench -p engine                             # evaluator + hand throughput (criterion)
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check
+cargo run --release -p cli -- bench               # engine/runner throughput, 1 thread vs all
+cargo run --release -p cli -- leaderboard         # print leaderboard.json
 
-cargo run --release -p cli -- run --config configs/6max_nlh.toml
-cargo run --release -p cli -- bench               # hands/s and evals/s at 1 thread and all threads
-cargo run --release -p cli -- leaderboard
-
-cd python && python3 -m venv .venv && .venv/bin/pip install maturin numpy pytest
-.venv/bin/maturin develop --release && .venv/bin/python -m pytest
+cd python && .venv/bin/maturin develop --release && .venv/bin/python -m pytest
 ```
 
-`arena run --config <file> [--seed N] [--threads N] [--rounds N] [--hands N] [--fresh]
-[--quiet] [--leaderboard F] [--results-dir D]` prints the sorted leaderboard and writes
-`results/<run_id>/`, which holds `config.toml`, `schedule.json`, `tables.jsonl`,
-`leaderboard.json`, `leaderboard.txt` and, if enabled, `hand_histories/`. It also updates
-`leaderboard.json`. Each run starts from the stored ratings unless you pass `--fresh`.
+The Rust tests drive the engine and runner with small test-only bots
+(`crates/arena/tests/common`). They're fixtures, not baselines. `arena bench` likewise uses
+a built-in random policy that exists only to measure throughput.
 
 ## Performance
 
@@ -79,123 +114,34 @@ Apple M4 Pro (8 performance + 4 efficiency cores), release build:
 
 | | 1 thread | 12 threads |
 |---|---|---|
-| 7-card evaluator, random hands | 480 M evals/s | 4.2 G evals/s (8.7×) |
-| 6-max NLHE, random-legal bots, full runner | 1.14 M hands/s | 8.4 M hands/s (7.3×; 6.4× / 80 % on the 8 P-cores) |
-| 6-max PLO, random-legal bots | 0.95 M hands/s | 7.1 M hands/s |
-| 6-max NLHE with hand histories on | 0.32 M hands/s | 2.2 M hands/s |
+| 7-card evaluator, random hands | 460–480 M evals/s | 4.0–4.2 G evals/s (8.7×) |
+| Engine + runner, 6-max NLHE, built-in random policy (`arena bench`) | 1.07–1.14 M hands/s | 7.2–8.4 M hands/s |
 
-The bare engine loop (no `dyn Bot`, no event broadcast) runs 1.9 M 6-max hands/s on one core.
+The bare engine loop (no bot dispatch, no event broadcast) runs 1.9 M 6-max hands/s on one
+core. With real Python bots, the bots dominate. The 7-bot demo (`configs/6max_nlh.toml`,
+6-max NLHE, 5 rounds) runs at about **195k hands/s** at 20,000 hands per table, and about
+90k hands/s at 1,000 hands per table, where worker start-up dominates. A Python decision
+costs about 1.1 µs for a trivial bot and 3–5 µs for the tight-aggressive baseline, whose
+equity sampling runs in Rust.
 
-**Rust vs Python bots.** `python/examples/baselines.py` holds line-by-line Python ports of
-`tag`, `random` and `calling_station`. The same three-bot arena (`configs/trio_rust.toml`
-vs `configs/trio_py.toml`: 6-max, 100k hands per table, 5 rounds, 1.5 M hands, 3 tables per
-round) took 6.2 s with Rust bots and 21.3 s with the Python ports, about 3.5× in both wall
-and CPU time. Results agree within their CIs. A Python decision costs about 1.1 µs for a
-trivial bot, against 0.01 µs in Rust. The tight-aggressive bot costs 5.5 µs against 2.6 µs,
-since its equity sampling runs in Rust in both cases.
+## Baseline bots and anchors
 
-## Writing a bot in Rust
+`pokerarena.baselines` holds the three baselines. Their Elo is **anchored** (fixed) in the
+shipped configs and the app:
 
-> **[BOTS.md](BOTS.md) is the full bot-author guide**: lifecycle, every field a bot
-> receives, legal actions, rules, helpers, determinism, duplicate mode, and tested examples.
-> The two sections below are quick summaries.
+| Bot | Class | Anchor Elo | Params |
+|---|---|---|---|
+| `random` | `RandomLegal` | 850 | `fold`, `call`, `raise` weights; `raise_sizes` (pot fractions) |
+| `station` | `CallingStation` | 400 | none |
+| `tag` | `TightAggressive` | 1300 | `samples`, `tightness`, `call_margin` |
 
-Implement `arena::Bot`. Only `act` is required:
+`TightAggressive` uses Chen-formula hand classes preflop, and Monte Carlo equity against the
+live opponents postflop (and preflop in PLO).
 
-```rust
-use arena::bot::{Action, Bot, Observation, PublicEvent};
-
-pub struct MinRaiser { name: String }
-
-impl Bot for MinRaiser {
-    fn name(&self) -> &str { &self.name }
-    fn act(&mut self, obs: &Observation) -> Action {
-        let la = obs.legal;                       // precomputed: never re-derive the rules
-        if la.can_raise { Action::RaiseTo(la.min_raise_to) }
-        else if la.can_check { Action::Check } else { Action::Call }
-    }
-    // Optional: new_match(&MatchInfo), new_hand(&HandStart), observe(&PublicEvent),
-    // end_hand(&HandResult)
-}
-```
-
-Hand it to the arena as a `BotFactory`, i.e. `Arc<dyn Fn(u64 /*seed*/) -> Box<dyn Bot> + Send + Sync>`.
-Every table seat gets a fresh instance, seeded deterministically, so seed any randomness
-from that seed. Read-only shared data such as a strategy table belongs in an `Arc` captured
-by the factory. To use the bot from configs, add a kind to `bots::factory`
-(`crates/bots/src/lib.rs`). Its params arrive as JSON (`serde_json::Value`).
-
-What a bot sees:
-
-- **`Observation`** is built by the engine for the acting seat only. It contains `seat`, `n_seats`,
-  `button`, `format`, `street`, `hole` (own cards only), `board`, and per-seat `stacks`,
-  `street_contrib`, `total_contrib` and `status`. It also has `pot`, `current_bet`,
-  `sb`/`bb`/`ante`, `legal` and `history` (every public action, blinds and antes included).
-  Other seats' hole cards never appear. They are revealed only through
-  `PublicEvent::Showdown`, and only for players who reach showdown.
-- **`Action`** is `Fold | Check | Call | BetTo(x) | RaiseTo(x) | AllIn`. Amounts are the
-  *total street contribution* (raise-to). `BetTo` and `RaiseTo` are interchangeable. `Call`
-  with nothing to call counts as a check. `AllIn` is legal when committing the whole stack is
-  a call or an allowed raise. In pot-limit and fixed-limit, a deep stack therefore can't
-  always shove.
-- **Illegal actions** are replaced by check or fold and counted in stats under the default
-  `illegal_action_policy = "fold_or_check"`. They abort the table under `"error"`.
-- **Duplicate mode**: bots must not carry hand-specific state across hands. They should take
-  their seat from `HandStart::seat` or `obs.seat`, because seats rotate between replays.
-
-## Writing a bot in Python
-
-```python
-import random
-from pokerarena import Action, BaseBot, equity
-
-class MyBot(BaseBot):
-    def __init__(self, seed: int = 0, samples: int = 200):   # constructed as MyBot(seed=..., **params)
-        self.rng = random.Random(seed)                         # seed randomness => reproducible runs
-        self.samples = samples
-
-    def act(self, obs):                                        # the only required method
-        la = obs.legal
-        live = sum(1 for s, st in enumerate(obs.status) if s != obs.seat and st in (1, 2))
-        e = equity(obs.hole, obs.board, live, self.samples, seed=self.rng.getrandbits(63),
-                   variant=obs.variant)
-        if la.can_raise and e > 0.7:
-            return Action.raise_to(la.min_raise_to)
-        if la.can_check:
-            return Action.check()
-        return Action.call() if e > la.call_amount / (obs.pot + la.call_amount) else Action.fold()
-```
-
-Reference it from a config as `kind = "python:mymodule.MyBot"`. The module must be importable,
-and `params` are passed as keyword arguments. `pokerarena.Bot` is the structural protocol.
-`BaseBot` supplies no-op hooks: `new_match(info)`, `new_hand(info)`, `observe(event)` and
-`end_hand(result)`, each receiving a dict (see `python/pokerarena/bot.py`).
-
-- **Cards** are ints `0..52` (`rank*4 + suit`, deuce = 0, suits c d h s). Helpers:
-  `card_to_str`, `parse_cards`, `evaluate`, `hand_category`.
-- **Observation arrays**: `hole` and `board` are `np.uint8`; `stacks`, `street_contrib` and
-  `total_contrib` are `np.uint64`. `status` is `np.uint8` (0 empty, 1 active, 2 all-in,
-  3 folded). `history` is a list of `(seat, street, kind, amount, to, all_in)`.
-- **Return value** from `act`: an `Action`, a kind string (`"call"`), or a tuple
-  (`("raise_to", 40)`). An exception in `act` counts as an illegal action. The first
-  traceback per bot instance is printed.
-- **Running**: `pokerarena.run("configs/x.toml", processes=None, threaded=False, seed=None,
-  rounds=None, threads=None, fresh=False, save=True)` returns `RunResult(rows, ratings,
-  table, results_dir)`. Rust-only tables run inside Rust on a thread pool with the GIL
-  released. Tables that seat a Python bot are spread over a `multiprocessing` pool. Each
-  worker runs its tables through Rust and returns serialized results, and the parent merges
-  them in table-id order before updating ratings. On free-threaded CPython (3.13t+, GIL
-  disabled), `threaded=True` runs Python tables on threads instead. On GIL builds it warns
-  and falls back to processes. Results are identical for any process or thread count.
-- Hooks a bot doesn't override (including `BaseBot`'s no-ops) are never called, so they cost
-  nothing.
-- `pokerarena.ArenaJob` is the controllable form of `run`: `start()` runs it in the
-  background, `progress()` returns a snapshot, `stop()` is the hard stop described above,
-  and `wait()` waits for cleanup. Scripts that run Python bots must guard their entry
-  point with `if __name__ == "__main__":`, because worker processes use the `spawn`
-  start method and re-import the main script.
-- The `arena` CLI runs Rust bots only. Configs containing `python:` kinds go through
-  `pokerarena.run`.
+An anchored bot still enters every expected-score computation, but its own rating never
+changes, so the anchors pin the scale and ratings stay comparable across runs and
+leaderboards. A bot that reliably beats `tag` ends up above 1300. Unanchored bots start at
+`[rating] initial` (1500 by default) or at their saved rating.
 
 ## Config format
 
@@ -203,9 +149,11 @@ and `params` are passed as keyword arguments. `pokerarena.Bot` is the structural
 [run]
 rounds = 5                    # R rounds; each round is re-scheduled
 seed = 2026                   # master seed
-# threads = 8                 # default: all cores
+# threads = 8                 # threads for in-process tables (free-threaded Python only)
 results_dir = "results"
 leaderboard = "leaderboard.json"
+replay_hands_per_bot = 0      # > 0: save that many random hands per bot (hand replays)
+replays_dir = "hand_replays"
 
 [format]
 variant = "nlhe"              # nlhe | plo | flhe
@@ -223,7 +171,7 @@ stack_policy = "reset_each_hand"   # reset_each_hand | rebuy_when_busted | top_u
 duplicate_mode = false        # replay each deal with bots rotated through all seats
 illegal_action_policy = "fold_or_check"   # fold_or_check | error
 record_timing = false         # per-decision wall-clock (not deterministic)
-hand_history = false          # PokerStars-like text per table, in results/<run_id>/hand_histories/
+hand_history = false          # every hand of every table, in results/<run_id>/hand_histories/
 
 [matchmaking]
 # seats_per_table = 6         # default: format.max_seats
@@ -241,23 +189,20 @@ margin_c = 30
 
 [[bots]]
 name = "tag"
-version = "1"                 # optional; leaderboard key becomes "tag@1"
-kind = "tag"                  # random | calling_station | tag | python:module.ClassName
-params = { samples = 300 }    # passed to the factory / constructor
+# version = "1"               # optional; leaderboard key becomes "tag@1"
+kind = "python:pokerarena.baselines.TightAggressive"   # python:module.ClassName
+params = { samples = 300 }    # passed to the constructor as keyword arguments
+anchor = 1300                 # optional fixed Elo
 ```
 
-Unknown keys are rejected. Duplicate mode requires `reset_each_hand` and is not available
-for tournaments. Example configs: `configs/6max_nlh.toml` (the 7-bot demo),
-`configs/hu_nlh.toml` (duplicate mode, margin Elo), `configs/6max_plo.toml` and
-`configs/tournament_6max.toml`.
+Unknown keys are rejected, and every bot must be a `python:` kind. Duplicate mode requires
+`reset_each_hand` and is not available for tournaments. Example configs:
 
-Built-in bots:
-
-- `random` takes params `fold`, `call`, `raise` (weights) and `raise_sizes` (pot fractions).
-- `calling_station` takes no params.
-- `tag` takes params `samples`, `tightness` and `call_margin`. Preflop it uses Chen-formula
-  hand classes; postflop (and preflop in PLO) it uses Monte Carlo equity against the live
-  opponents.
+- `configs/6max_nlh.toml`: the 7-bot demo (the three anchored baselines plus four variants).
+- `configs/hu_nlh.toml`: heads-up with duplicate mode and margin Elo.
+- `configs/6max_plo.toml`
+- `configs/tournament_6max.toml`
+- `configs/trio.toml`
 
 ## Matchmaking
 
@@ -300,13 +245,15 @@ distinct bots `(i, j)`:
 - Update: `Δ_i = K/(n−1) · Σ_j (S_ij − E_ij)`.
 
 Deltas accumulate over the whole round and are applied once at round end, so results don't
-depend on table order. Each pair's update is symmetric, so total rating is conserved.
-Defaults: initial 1500, K = 16. **Choosing K.** K is a step size. It changes how fast and how noisily ratings move, not
-what a rating difference means: the 400-point logistic scale is what makes ratings
-comparable to chess (400 points ≈ 91% expected score). Each table splits K across the
-other n−1 bots, so the chess-equivalent K per pairwise comparison is K/(n−1), about K/5 at
-6-max. Chess uses 10–40 per game. Measured on the 7-bot demo (60 rounds of 1,000 hands per
-table):
+depend on table order. **Anchored** bots (see above) keep their rating, so with anchors
+total rating is not conserved. Defaults: initial 1500, K = 16.
+
+**Choosing K.** K is a step size. It changes how fast and how noisily ratings move, not what
+a rating difference means: the 400-point logistic scale is what makes ratings comparable to
+chess (400 points ≈ 91% expected score). Each table splits K across the other n−1 bots, so
+the chess-equivalent K per pairwise comparison is K/(n−1), about K/5 at 6-max. Chess uses
+10–40 per game. These figures were measured on the 7-bot demo (60 rounds of 1,000 hands per
+table, with the same strategies and no anchors):
 
 | K | rating noise (SD) | median move per round | rounds where the order changed |
 |---|---|---|---|
@@ -324,9 +271,20 @@ The `RatingSystem` trait (`begin_round`, `add_table`, `end_round`, `ratings`) le
 TrueSkill or Plackett–Luce.
 
 The leaderboard reports Elo and its change, hands, hand-weighted bb/100, and a 95% CI of
-`±1.96·sd/√n`, computed over the per-table bb/100 samples (the bot's seats at a table pooled). It also shows VPIP, PFR,
-showdown rate, illegal actions, mean decision time and (tournaments) mean place. In
-tournaments bb/100 uses the first level's big blind.
+`±1.96·sd/√n`, computed over the per-table bb/100 samples (the bot's seats at a table pooled).
+It also shows VPIP, PFR, showdown rate, illegal actions, mean decision time and, for
+tournaments, mean place. In tournaments bb/100 uses the first level's big blind.
+
+## Hand replays
+
+With `replay_hands_per_bot = N` (the app uses 100), each bot gets `N` hands drawn uniformly
+without replacement from all the hands it played in the run. The sample is drawn up front
+from the master seed and the schedules, so every worker process agrees on it, and only
+those hands' histories are recorded. Results are identical with and without replays. Files
+go to `hand_replays/<run_id>/<bot>.txt` after a completed run (never after Stop). Each hand
+is headed `### Round r · table t · hand h` and followed by a PokerStars-style history
+showing all hole cards. In tournaments a sampled hand may never be played, if the table
+finished earlier, so a file can hold fewer than `N` hands.
 
 ## Determinism
 
@@ -335,8 +293,8 @@ process count. The schedule of round `r` is seeded `mix(master, r, SCHEDULE)`. T
 seeded `mix(master, r, t)`, and that seed derives the deck RNG and every bot instance's seed.
 Tables share no mutable state, results merge in table-id order, and ratings update
 sequentially after each round. Tests assert identical serialized output at 1, 3 and 8
-threads (Rust), and at 1 and 4 processes for mixed Rust+Python runs. Decision timing is the
-one non-deterministic field, and it is off by default.
+threads, and at 1 and 4 worker processes for Python runs. Decision timing is the one
+non-deterministic field, and it is off by default.
 
 ## Rules and conventions
 

@@ -1,16 +1,21 @@
-//! `arena`: run bot tournaments, benchmark the engine, show the leaderboard.
+//! `arena`: benchmark the engine and show the persisted leaderboard.
+//!
+//! Runs with bots go through the Poker Arena desktop app or the Python package
+//! (`pokerarena.run`): all bots are Python bots. The benchmark drives tables with a small
+//! built-in random policy that exists only to measure engine and runner throughput.
 
-use arena::config::ConfigFile;
-use arena::leaderboard::{render, utc_timestamp, write_results_dir};
+use arena::bot::{Action, Bot, BotFactory, Observation};
 use arena::runner::{build_pool, run_tables};
-use arena::{run, BotEntry, LeaderboardFile, RunSpec, Schedule, TableConfig};
+use arena::{LeaderboardFile, RunSpec, Schedule, TableConfig};
 use clap::{Parser, Subcommand, ValueEnum};
+use engine::rng::{below, unit_f64};
 use engine::{Card, Deck, Evaluator, GameFormat};
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -22,36 +27,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run a configured set of rounds and update the leaderboard.
-    Run {
-        /// TOML config file.
-        #[arg(long)]
-        config: PathBuf,
-        /// Override the master seed.
-        #[arg(long)]
-        seed: Option<u64>,
-        /// Override the number of worker threads.
-        #[arg(long)]
-        threads: Option<usize>,
-        /// Override the number of rounds.
-        #[arg(long)]
-        rounds: Option<usize>,
-        /// Override hands per table.
-        #[arg(long)]
-        hands: Option<u64>,
-        /// Ignore stored ratings and start every bot from the initial rating.
-        #[arg(long)]
-        fresh: bool,
-        /// No progress bar.
-        #[arg(long)]
-        quiet: bool,
-        /// Override the leaderboard file.
-        #[arg(long)]
-        leaderboard: Option<PathBuf>,
-        /// Override the results directory.
-        #[arg(long)]
-        results_dir: Option<PathBuf>,
-    },
     /// Benchmark evaluator and full-hand throughput at 1 thread and at all threads.
     Bench {
         /// Tables per measurement.
@@ -87,27 +62,6 @@ enum BenchVariant {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let r = match cli.cmd {
-        Cmd::Run {
-            config,
-            seed,
-            threads,
-            rounds,
-            hands,
-            fresh,
-            quiet,
-            leaderboard,
-            results_dir,
-        } => cmd_run(RunArgs {
-            config,
-            seed,
-            threads,
-            rounds,
-            hands,
-            fresh,
-            quiet,
-            leaderboard,
-            results_dir,
-        }),
         Cmd::Bench {
             tables,
             hands,
@@ -124,112 +78,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-struct RunArgs {
-    config: PathBuf,
-    seed: Option<u64>,
-    threads: Option<usize>,
-    rounds: Option<usize>,
-    hands: Option<u64>,
-    fresh: bool,
-    quiet: bool,
-    leaderboard: Option<PathBuf>,
-    results_dir: Option<PathBuf>,
-}
-
-fn cmd_run(a: RunArgs) -> Result<(), String> {
-    let text = std::fs::read_to_string(&a.config)
-        .map_err(|e| format!("cannot read {}: {e}", a.config.display()))?;
-    let mut cfg = ConfigFile::parse(&text)?;
-    let mut overrides = Vec::new();
-    if let Some(s) = a.seed {
-        cfg.run.seed = s;
-        overrides.push(format!("seed = {s}"));
-    }
-    if let Some(t) = a.threads {
-        cfg.run.threads = Some(t);
-        overrides.push(format!("threads = {t}"));
-    }
-    if let Some(r) = a.rounds {
-        cfg.run.rounds = r;
-        overrides.push(format!("rounds = {r}"));
-    }
-    if let Some(h) = a.hands {
-        cfg.table.hands_per_table = h;
-        overrides.push(format!("hands_per_table = {h}"));
-    }
-    let spec = cfg.run_spec()?;
-
-    let mut entries = Vec::with_capacity(cfg.bots.len());
-    for b in &cfg.bots {
-        if let Some(target) = b.python_target() {
-            return Err(format!(
-                "bot `{}` is a Python bot ({target}); the `arena` binary runs Rust bots only. \
-                 Use `pokerarena.run(config)` from Python for mixed runs.",
-                b.name
-            ));
-        }
-        let factory = bots::factory(&b.kind, &b.name, &b.params)
-            .map_err(|e| format!("bot `{}`: {e}", b.name))?;
-        entries.push(BotEntry {
-            name: b.name.clone(),
-            version: b.version.clone(),
-            factory,
-        });
-    }
-    let keys: Vec<String> = entries.iter().map(|e| e.key()).collect();
-
-    let lb_path = a
-        .leaderboard
-        .unwrap_or_else(|| PathBuf::from(&cfg.run.leaderboard));
-    let mut lb =
-        LeaderboardFile::load(&lb_path).map_err(|e| format!("{}: {e}", lb_path.display()))?;
-    if a.fresh {
-        for k in &keys {
-            lb.entries.remove(k);
-        }
-    }
-    let initial = lb.initial_ratings(&keys, spec.rating.initial);
-
-    let t0 = Instant::now();
-    let out = run(&spec, &entries, initial, a.quiet).map_err(|e| e.to_string())?;
-    let elapsed = t0.elapsed().as_secs_f64();
-    let rows = out.state.rows();
-    let hands: u64 = out
-        .rounds
-        .iter()
-        .flat_map(|r| &r.results)
-        .map(|t| t.hands_played)
-        .sum();
-    let tables: usize = out.rounds.iter().map(|r| r.results.len()).sum();
-
-    let run_id = format!("{}-s{}", utc_timestamp(), spec.seed);
-    let mut cfg_text = text;
-    if !overrides.is_empty() {
-        cfg_text.push_str(&format!("\n# CLI overrides: {}\n", overrides.join(", ")));
-    }
-    let results_base = a
-        .results_dir
-        .unwrap_or_else(|| PathBuf::from(&cfg.run.results_dir));
-    let dir = write_results_dir(&results_base, &run_id, &cfg_text, &keys, &out.rounds, &rows)
-        .map_err(|e| format!("writing results: {e}"))?;
-    lb.update(&rows, spec.table.reference_bb(), &run_id);
-    lb.save(&lb_path)
-        .map_err(|e| format!("{}: {e}", lb_path.display()))?;
-
-    println!(
-        "{} rounds, {tables} tables, {hands} hands in {elapsed:.2}s ({:.0} hands/s)\n",
-        spec.rounds,
-        hands as f64 / elapsed
-    );
-    print!("{}", render(&rows));
-    println!(
-        "\nresults: {}\nleaderboard: {}",
-        dir.display(),
-        lb_path.display()
-    );
-    Ok(())
 }
 
 fn cmd_leaderboard(file: &std::path::Path) -> Result<(), String> {
@@ -315,16 +163,17 @@ fn cmd_bench(
         rounds: 1,
         seed: 42,
         threads: None,
+        replay_hands_per_bot: 0,
     };
-    let factories = vec![bots::factory("random", "random", &serde_json::Value::Null)?];
+    let factories: Vec<BotFactory> = vec![Arc::new(|seed| Box::new(BenchPolicy::new(seed)))];
     let schedule = Schedule {
         tables: vec![vec![0; 6]; tables],
     };
     let bar = arena::RunProgress::hidden();
     let measure = |pool: &rayon::ThreadPool| -> Result<f64, String> {
         let t = Instant::now();
-        let res =
-            run_tables(&spec, &factories, &schedule, 0, pool, &bar).map_err(|e| e.to_string())?;
+        let res = run_tables(&spec, &factories, &schedule, 0, pool, &bar, None)
+            .map_err(|e| e.to_string())?;
         let played: u64 = res.iter().map(|r| r.hands_played).sum();
         Ok(played as f64 / t.elapsed().as_secs_f64())
     };
@@ -346,4 +195,40 @@ fn cmd_bench(
         100.0 * hn / h1 / all as f64
     );
     Ok(())
+}
+
+/// Benchmark-only random-legal policy (fold 25% / call 50% / raise 25% to 0.5 or 1 pot when
+/// facing a bet; check or bet otherwise). Not a selectable bot.
+struct BenchPolicy {
+    rng: Xoshiro256PlusPlus,
+}
+
+impl BenchPolicy {
+    fn new(seed: u64) -> Self {
+        BenchPolicy {
+            rng: Xoshiro256PlusPlus::seed_from_u64(seed),
+        }
+    }
+}
+
+impl Bot for BenchPolicy {
+    fn name(&self) -> &str {
+        "bench"
+    }
+    fn act(&mut self, obs: &Observation) -> Action {
+        let la = obs.legal;
+        let u = unit_f64(&mut self.rng);
+        if u < 0.75 || !la.can_raise {
+            return if la.can_check {
+                Action::Check
+            } else if u < 0.25 {
+                Action::Fold
+            } else {
+                Action::Call
+            };
+        }
+        let frac = [0.5, 1.0][below(&mut self.rng, 2) as usize];
+        let to = obs.current_bet + ((obs.pot + la.call_amount) as f64 * frac) as u64;
+        Action::RaiseTo(to.clamp(la.min_raise_to, la.max_raise_to))
+    }
 }

@@ -1,32 +1,32 @@
 //! Parallel runner: determinism across thread counts, external table execution, persistence.
 
+mod common;
+
 use arena::runner::{run_table_external, table_seed};
 use arena::{
     run, BotEntry, LeaderboardFile, MatchmakingConfig, RatingConfig, RunSpec, RunState, TableConfig,
 };
 use engine::GameFormat;
-use serde_json::json;
 
 fn entries() -> Vec<BotEntry> {
-    let mk = |name: &str, kind: &str, params: serde_json::Value| BotEntry {
+    let mk = |name: &str, factory| BotEntry {
         name: name.into(),
         version: None,
-        factory: bots::factory(kind, name, &params).unwrap(),
+        factory,
+        anchor: None,
     };
     vec![
-        mk("tag", "tag", json!({"samples": 60})),
+        mk("raiser", common::raiser("raiser")),
         mk(
-            "tag_loose",
-            "tag",
-            json!({"samples": 60, "tightness": -2.0}),
+            "random_loose",
+            common::random_w("random_loose", 0.5, 2.0, 1.0),
         ),
-        mk("random", "random", json!(null)),
+        mk("random", common::random("random")),
         mk(
             "random_aggro",
-            "random",
-            json!({"fold": 1, "call": 1, "raise": 2}),
+            common::random_w("random_aggro", 1.0, 1.0, 2.0),
         ),
-        mk("station", "calling_station", json!(null)),
+        mk("station", common::station("station")),
     ]
 }
 
@@ -39,6 +39,7 @@ fn spec(threads: usize) -> RunSpec {
         rounds: 3,
         seed: 1234,
         threads: Some(threads),
+        replay_hands_per_bot: 0,
     }
 }
 
@@ -246,10 +247,101 @@ fn hooks_do_not_change_results() {
             hands_done: Some(&hands),
             cancel: Some(&cancel),
             on_hand: Some(&on_hand),
+            record: None,
         },
     )
     .unwrap();
     assert_eq!(plain, hooked);
     assert_eq!(hands.load(Ordering::Relaxed), 300);
     assert_eq!(calls.load(Ordering::Relaxed), 300);
+}
+
+#[test]
+fn anchored_bots_keep_their_rating() {
+    let mut bots = entries();
+    bots[2].anchor = Some(850.0); // random
+    bots[4].anchor = Some(400.0); // station
+    let out = run(&spec(4), &bots, vec![1500.0; 5], true).unwrap();
+    assert_eq!(out.state.ratings()[2], 850.0);
+    assert_eq!(out.state.ratings()[4], 400.0);
+    let rows = out.state.rows();
+    for r in &rows {
+        assert_eq!(r.anchored, r.key == "random" || r.key == "station");
+        if r.anchored {
+            assert_eq!(r.rating_change, 0.0);
+        }
+    }
+    // The others moved relative to the anchors.
+    assert!(out.state.ratings()[0] != 1500.0);
+    let mut lb = LeaderboardFile::default();
+    lb.update(&rows, 2, "r1");
+    assert_eq!(lb.entries["station"].rating, 400.0);
+    // Anchors override stored ratings on the next run.
+    let mut bots2 = entries();
+    bots2[4].anchor = Some(400.0);
+    let keys: Vec<String> = bots2.iter().map(|b| b.key()).collect();
+    let mut init = lb.initial_ratings(&keys, 1500.0);
+    init[4] = 999.0;
+    let out2 = run(&spec(2), &bots2, init, true).unwrap();
+    assert_eq!(out2.state.ratings()[4], 400.0);
+}
+
+#[test]
+fn hand_replays_sample_record_and_write() {
+    use arena::replays::write_replays;
+    let bots = entries();
+    let mut sp = spec(3);
+    sp.replay_hands_per_bot = 20;
+    let out = run(&sp, &bots, vec![1500.0; 5], true).unwrap();
+    let plan = &out.replay_plan;
+    for (b, picks) in plan.per_bot.iter().enumerate() {
+        assert_eq!(picks.len(), 20, "bot {b}");
+        for &(r, t, h) in picks {
+            let res = &out.rounds[r].results[t];
+            assert!(
+                res.seats.iter().any(|s| s.bot == b),
+                "sampled a table without the bot"
+            );
+            let rec = res
+                .recorded_hands
+                .iter()
+                .find(|x| x.hand_id == h)
+                .expect("hand recorded");
+            assert!(
+                rec.text.contains(&bots[b].name),
+                "bot not in its sampled hand"
+            );
+        }
+    }
+    // Only sampled hands are recorded.
+    let recorded: usize = out
+        .rounds
+        .iter()
+        .flat_map(|r| &r.results)
+        .map(|t| t.recorded_hands.len())
+        .sum();
+    let planned: usize = plan.per_table.values().map(|v| v.len()).sum();
+    assert_eq!(recorded, planned);
+    // Recording does not change results, and is identical across thread counts.
+    let plain = run(&spec(3), &bots, vec![1500.0; 5], true).unwrap();
+    assert_eq!(plain.state.rows(), out.state.rows());
+    let mut sp8 = sp.clone();
+    sp8.threads = Some(8);
+    let out8 = run(&sp8, &bots, vec![1500.0; 5], true).unwrap();
+    assert_eq!(
+        serde_json::to_string(&out8.rounds).unwrap(),
+        serde_json::to_string(&out.rounds).unwrap()
+    );
+
+    let dir = std::env::temp_dir().join(format!("arena_replays_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let keys: Vec<String> = bots.iter().map(|b| b.key()).collect();
+    let d = write_replays(&dir, "run1", &keys, plan, &out.rounds).unwrap();
+    for k in &keys {
+        let text = std::fs::read_to_string(d.join(format!("{k}.txt"))).unwrap();
+        assert_eq!(text.matches("### Round").count(), 20, "{k}");
+        assert_eq!(text.matches("Hand #").count(), 20, "{k}");
+    }
+    assert!(!dir.join(".run1.partial").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

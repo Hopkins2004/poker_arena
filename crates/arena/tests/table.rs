@@ -1,4 +1,6 @@
-//! Table-runner tests using the baseline bots.
+//! Table-runner tests (with test-only bots from `common`).
+
+mod common;
 
 use arena::bot::{Action, Bot, Observation};
 use arena::{
@@ -6,18 +8,13 @@ use arena::{
     TableMode,
 };
 use engine::GameFormat;
-use serde_json::json;
 use std::sync::Arc;
-
-fn f(kind: &str, name: &str) -> BotFactory {
-    bots::factory(kind, name, &serde_json::Value::Null).unwrap()
-}
 
 fn lineup() -> Vec<BotFactory> {
     vec![
-        f("random", "random"),
-        f("calling_station", "station"),
-        f("tag", "tag"),
+        common::random("random"),
+        common::station("station"),
+        common::raiser("raiser"),
     ]
 }
 
@@ -200,17 +197,4 @@ fn timing_and_hand_history() {
     assert_eq!(hh.matches("Hand #").count(), 20);
     assert!(hh.contains("*** HOLE CARDS ***"));
     assert!(hh.contains("posts big blind 2"));
-}
-
-#[test]
-fn registry_params() {
-    assert!(bots::factory(
-        "random",
-        "r",
-        &json!({"fold": 0, "call": 1, "raise": 3, "raise_sizes": [0.33, 2.0]})
-    )
-    .is_ok());
-    assert!(bots::factory("random", "r", &json!({"bogus": 1})).is_err());
-    assert!(bots::factory("tag", "t", &json!({"samples": 100, "tightness": 1.5})).is_ok());
-    assert!(bots::factory("nope", "x", &json!(null)).is_err());
 }

@@ -1,4 +1,4 @@
-//! Config files and end-to-end CLI smoke tests.
+//! Shipped configs and CLI smoke tests.
 
 use arena::config::ConfigFile;
 use std::path::PathBuf;
@@ -9,115 +9,83 @@ fn repo() -> PathBuf {
 }
 
 #[test]
-fn shipped_configs_are_valid() {
-    for name in ["6max_nlh", "hu_nlh", "6max_plo", "tournament_6max"] {
-        let path = repo().join("configs").join(format!("{name}.toml"));
-        let cfg = ConfigFile::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
-        cfg.run_spec().unwrap_or_else(|e| panic!("{name}: {e}"));
-        for b in &cfg.bots {
-            bots::factory(&b.kind, &b.name, &b.params)
-                .unwrap_or_else(|e| panic!("{name}/{}: {e}", b.name));
+fn shipped_configs_are_valid_and_python_only() {
+    let mut n = 0;
+    for entry in std::fs::read_dir(repo().join("configs")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
         }
+        let cfg = ConfigFile::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        cfg.run_spec()
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for b in &cfg.bots {
+            assert!(
+                b.python_target().is_some(),
+                "{}: bot `{}` is not a Python bot",
+                path.display(),
+                b.name
+            );
+        }
+        n += 1;
     }
+    assert!(n >= 4);
     let demo = ConfigFile::load(&repo().join("configs/6max_nlh.toml")).unwrap();
-    assert_eq!(demo.bots.len(), 7);
-    assert_eq!(demo.table.hands_per_table, 1000);
-    assert_eq!(demo.run.rounds, 5);
+    let anchors: Vec<(String, Option<f64>)> = demo
+        .bots
+        .iter()
+        .map(|b| (b.name.clone(), b.anchor))
+        .collect();
+    for (name, a) in [("random", 850.0), ("station", 400.0), ("tag", 1300.0)] {
+        assert!(
+            anchors.contains(&(name.to_string(), Some(a))),
+            "{name} anchored at {a}"
+        );
+    }
 }
 
 #[test]
-fn run_and_leaderboard_end_to_end() {
-    let tmp = std::env::temp_dir().join(format!("arena_cli_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let cfg = tmp.join("c.toml");
-    std::fs::write(
-        &cfg,
-        r#"
-[run]
-rounds = 2
-seed = 3
-[format]
-variant = "nlhe"
-max_seats = 6
-[table]
-hands_per_table = 50
-blinds = { sb = 1, bb = 2 }
-hand_history = true
-[[bots]]
-name = "r"
-kind = "random"
-[[bots]]
-name = "s"
-kind = "calling_station"
-[[bots]]
-name = "t"
-version = "1"
-kind = "tag"
-params = { samples = 50 }
-"#,
-    )
-    .unwrap();
-    let lb = tmp.join("lb.json");
-    let res = tmp.join("results");
+fn bench_and_leaderboard_smoke() {
     let bin = env!("CARGO_BIN_EXE_arena");
-    let run = |extra: &[&str]| {
-        let out = Command::new(bin)
-            .args(["run", "--config", cfg.to_str().unwrap(), "--quiet"])
-            .args([
-                "--leaderboard",
-                lb.to_str().unwrap(),
-                "--results-dir",
-                res.to_str().unwrap(),
-            ])
-            .args(extra)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
-    };
-    let first = run(&["--threads", "2"]);
-    assert!(first.contains("t@1"), "{first}");
-    let second = run(&["--rounds", "1"]);
-    assert!(second.contains("hands"));
     let out = Command::new(bin)
-        .args(["leaderboard", "--file", lb.to_str().unwrap()])
+        .args(["bench", "--tables", "4", "--hands", "500", "--threads", "2"])
         .output()
         .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.contains("t@1") && text.contains("r") && text.contains("s"),
+        text.contains("evals/s") && text.contains("hands/s"),
         "{text}"
     );
-    let stored = arena::LeaderboardFile::load(&lb).unwrap();
-    assert!(stored.entries.values().all(|e| e.runs == 2));
-    // --fresh resets stored history for the bots in the run.
-    run(&["--fresh"]);
-    let stored = arena::LeaderboardFile::load(&lb).unwrap();
-    assert!(stored.entries.values().all(|e| e.runs == 1));
-    let dirs: Vec<_> = std::fs::read_dir(&res).unwrap().collect();
-    assert!(!dirs.is_empty());
-    let d = dirs[0].as_ref().unwrap().path();
-    assert!(d.join("hand_histories").exists());
 
-    // Python bots are rejected by the Rust binary with a helpful message.
-    let py = tmp.join("py.toml");
-    std::fs::write(
-        &py,
-        std::fs::read_to_string(&cfg)
-            .unwrap()
-            .replace("kind = \"calling_station\"", "kind = \"python:mybots.Bot\""),
-    )
-    .unwrap();
+    let tmp = std::env::temp_dir().join(format!("arena_cli_lb_{}.json", std::process::id()));
+    let mut lb = arena::LeaderboardFile::default();
+    lb.entries.insert(
+        "tag".into(),
+        arena::leaderboard::StoredEntry {
+            rating: 1300.0,
+            hands: 10,
+            net_bb: 1.0,
+            tables: 1,
+            runs: 1,
+            last_run: "r".into(),
+        },
+    );
+    lb.save(&tmp).unwrap();
     let out = Command::new(bin)
-        .args(["run", "--config", py.to_str().unwrap(), "--quiet"])
+        .args(["leaderboard", "--file", tmp.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1300.0"));
+    let _ = std::fs::remove_file(&tmp);
+    // `run` no longer exists: bots are Python-only.
+    let out = Command::new(bin)
+        .args(["run", "--config", "x"])
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("pokerarena.run"));
-    let _ = std::fs::remove_dir_all(&tmp);
 }

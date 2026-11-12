@@ -14,6 +14,7 @@ use crate::bot::BotFactory;
 use crate::leaderboard::LeaderboardRow;
 use crate::matchmaking::{make_schedule, MatchmakingConfig, MatchmakingError, Schedule};
 use crate::rating::{PairwiseElo, RatingConfig, RatingSystem, TableOutcome};
+use crate::replays::{plan_replays, ReplayPlan};
 use crate::stats::SeatStats;
 use crate::table::{
     run_table, run_table_with_hooks, TableConfig, TableError, TableHooks, TableResult,
@@ -47,6 +48,8 @@ pub struct RunSpec {
     pub seed: u64,
     /// Worker threads (`None` = all cores).
     pub threads: Option<usize>,
+    /// Hands per bot to sample for hand replays (0 = off). See [`crate::replays`].
+    pub replay_hands_per_bot: usize,
 }
 
 /// A participating bot.
@@ -58,6 +61,8 @@ pub struct BotEntry {
     pub version: Option<String>,
     /// Factory creating fresh instances.
     pub factory: BotFactory,
+    /// Fixed Elo rating, if this bot is an anchor (see [`crate::rating`]).
+    pub anchor: Option<f64>,
 }
 
 impl BotEntry {
@@ -140,6 +145,7 @@ pub struct RunState {
     /// Per (table, bot) pooled bb/100 samples, for confidence intervals.
     samples: Vec<Vec<f64>>,
     places: Vec<Vec<u32>>,
+    anchored: Vec<bool>,
     rounds_applied: usize,
 }
 
@@ -175,8 +181,41 @@ impl RunState {
             stats: vec![SeatStats::default(); n],
             samples: vec![Vec::new(); n],
             places: vec![Vec::new(); n],
+            anchored: vec![false; n],
             rounds_applied: 0,
         })
+    }
+
+    /// Anchors bots at fixed ratings (`None` = rated normally). Must be called before the
+    /// first round; an anchor overrides any starting rating.
+    pub fn set_anchors(&mut self, anchors: &[Option<f64>]) -> Result<(), RunError> {
+        if anchors.len() != self.keys.len() {
+            return Err(RunError::Config("one anchor entry per bot required".into()));
+        }
+        if self.rounds_applied > 0 {
+            return Err(RunError::Config(
+                "anchors must be set before the first round".into(),
+            ));
+        }
+        for (b, a) in anchors.iter().enumerate() {
+            if let Some(r) = *a {
+                if !r.is_finite() {
+                    return Err(RunError::Config(format!(
+                        "anchor of `{}` must be finite",
+                        self.keys[b]
+                    )));
+                }
+                self.elo.anchor(b, r);
+                self.initial[b] = r;
+                self.anchored[b] = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Which bots are anchored.
+    pub fn anchored(&self) -> &[bool] {
+        &self.anchored
     }
 
     /// The run spec.
@@ -205,6 +244,21 @@ impl RunState {
             mix_seed(self.spec.seed, round as u64, SCHEDULE_STREAM),
         )
         .map_err(RunError::Matchmaking)
+    }
+
+    /// The hand-replay plan for this run (empty when replays are off).
+    pub fn replay_plan(&self) -> Result<ReplayPlan, RunError> {
+        let schedules = (0..self.spec.rounds)
+            .map(|r| self.schedule(r))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(plan_replays(
+            &schedules,
+            self.keys.len(),
+            self.spec.table.hands,
+            self.spec.table.duplicate,
+            self.spec.replay_hands_per_bot,
+            self.spec.seed,
+        ))
     }
 
     /// Seed of table `table` in round `round`.
@@ -259,6 +313,7 @@ impl RunState {
                     &self.samples[b],
                     &self.places[b],
                     bb,
+                    self.anchored[b],
                 )
             })
             .collect();
@@ -329,6 +384,7 @@ pub fn run_tables(
     round: usize,
     pool: &rayon::ThreadPool,
     progress: &RunProgress,
+    replays: Option<&ReplayPlan>,
 ) -> Result<Vec<TableResult>, RunError> {
     pool.install(|| {
         schedule
@@ -340,6 +396,7 @@ pub fn run_tables(
                     hands_done: Some(&progress.hands_done),
                     cancel: Some(&progress.cancel),
                     on_hand: None,
+                    record: replays.map(|p| p.record_for(round, t)),
                 };
                 let r = run_table_with_hooks(
                     &spec.format,
@@ -388,6 +445,8 @@ pub struct RunOutput {
     pub state: RunState,
     /// Every round's schedule and results.
     pub rounds: Vec<RoundRecord>,
+    /// Hands sampled for replays (see [`crate::replays::write_replays`]).
+    pub replay_plan: ReplayPlan,
 }
 
 /// Runs `spec.rounds` rounds for `bots` with the given starting ratings, with a terminal
@@ -424,6 +483,9 @@ pub fn run_with_progress(
     let keys = bots.iter().map(|b| b.key()).collect();
     let factories: Vec<BotFactory> = bots.iter().map(|b| b.factory.clone()).collect();
     let mut state = RunState::new(spec.clone(), keys, initial)?;
+    let anchors: Vec<Option<f64>> = bots.iter().map(|b| b.anchor).collect();
+    state.set_anchors(&anchors)?;
+    let plan = state.replay_plan()?;
     let pool = build_pool(spec.threads)?;
     let schedules: Vec<Schedule> = (0..spec.rounds)
         .map(|r| state.schedule(r))
@@ -439,7 +501,7 @@ pub fn run_with_progress(
         progress
             .bar
             .set_message(format!("{}/{}", r + 1, spec.rounds));
-        let results = run_tables(spec, &factories, &schedule, r, &pool, progress)?;
+        let results = run_tables(spec, &factories, &schedule, r, &pool, progress, Some(&plan))?;
         state.apply_round(&results);
         rounds.push(RoundRecord {
             round: r,
@@ -449,7 +511,11 @@ pub fn run_with_progress(
         progress.rounds_done.fetch_add(1, Ordering::Relaxed);
     }
     progress.bar.finish_and_clear();
-    Ok(RunOutput { state, rounds })
+    Ok(RunOutput {
+        state,
+        rounds,
+        replay_plan: plan,
+    })
 }
 
 /// Runs a single table of a schedule (for drivers that execute tables outside the pool).
