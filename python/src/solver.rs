@@ -7,6 +7,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use solver::{Abstraction, Edge, HandSet, NodeKind, Params, Solver, Tree, N_COMBOS};
 
+type ArrayPair<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>);
+
 fn verr<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
@@ -289,6 +291,38 @@ pub fn solver_range_equity<'py>(
     Ok(PyArray1::from_vec(py, eq))
 }
 
+/// Showdown equity of every combo against the opponent range `opp` (1326 weights) on a
+/// river board: (win + tie/2) / compatible mass. Blocked combos, or combos with no
+/// compatible opponent mass, get 0. Returns `(equity, mass)`.
+#[pyfunction]
+pub fn solver_river_equity<'py>(
+    py: Python<'py>,
+    board: Vec<u8>,
+    opp: PyReadonlyArray1<'py, f32>,
+) -> PyResult<ArrayPair<'py>> {
+    let b = board5(&board)?;
+    let opp = slice(&opp, N_COMBOS, "opp")?;
+    let (eq, mass) = py.detach(|| {
+        let rh = solver::RiverHands::new(&b);
+        let q = rh.gather(opp);
+        let n = rh.set.len();
+        let (mut net, mut mass) = (vec![0f32; n], vec![0f32; n]);
+        solver::terminal::showdown_net(&rh.set, &q, &mut net);
+        solver::terminal::compat_mass(&rh.set, &q, &mut mass);
+        let eq: Vec<f32> = (0..n)
+            .map(|h| {
+                if mass[h] > 0.0 {
+                    0.5 * (mass[h] + net[h]) / mass[h]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        (rh.scatter(&eq), rh.scatter(&mass))
+    });
+    Ok((PyArray1::from_vec(py, eq), PyArray1::from_vec(py, mass)))
+}
+
 /// Registers the solver functions on `_native`.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_build_tree, m)?)?;
@@ -296,5 +330,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_river_solve, m)?)?;
     m.add_function(wrap_pyfunction!(solver_abstract_solve, m)?)?;
     m.add_function(wrap_pyfunction!(solver_range_equity, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_river_equity, m)?)?;
     Ok(())
 }
