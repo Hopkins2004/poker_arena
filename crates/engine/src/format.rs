@@ -1,6 +1,7 @@
 //! Game format description: variant, table size, hole cards and betting structure.
 
-/// Poker variant. Determines how showdown hands are evaluated.
+/// Format id. Each variant's rules (deal, showdown, equity, validation) live in its own file
+/// under [`crate::rules::formats`]; [`crate::rules::rules`] maps the id to them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Variant {
     /// No-limit Texas Hold'em.
@@ -61,39 +62,27 @@ impl std::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 impl GameFormat {
-    /// No-limit Hold'em with `seats` seats.
+    /// No-limit Hold'em with `seats` seats (see [`crate::rules::formats::nlhe`]).
     pub const fn nlhe(seats: u8) -> GameFormat {
-        GameFormat {
-            variant: Variant::NLHE,
-            max_seats: seats,
-            hole_cards: 2,
-            betting: Betting::NoLimit,
-        }
+        crate::rules::formats::nlhe::format(seats)
     }
-    /// Pot-limit Omaha with `seats` seats.
+    /// Pot-limit Omaha with `seats` seats (see [`crate::rules::formats::plo`]).
     pub const fn plo(seats: u8) -> GameFormat {
-        GameFormat {
-            variant: Variant::PLO,
-            max_seats: seats,
-            hole_cards: 4,
-            betting: Betting::PotLimit,
-        }
+        crate::rules::formats::plo::format(seats)
     }
-    /// Fixed-limit Hold'em with the given bet sizes and a cap of 4 (bet, raise, re-raise, cap).
+    /// Fixed-limit Hold'em with the given bet sizes and a cap of 4
+    /// (see [`crate::rules::formats::flhe`]).
     pub const fn flhe(seats: u8, small_bet: u64, big_bet: u64) -> GameFormat {
-        GameFormat {
-            variant: Variant::FLHE,
-            max_seats: seats,
-            hole_cards: 2,
-            betting: Betting::FixedLimit {
-                small_bet,
-                big_bet,
-                cap: 4,
-            },
-        }
+        crate::rules::formats::flhe::format(seats, small_bet, big_bet)
     }
 
-    /// Checks internal consistency.
+    /// The rules of this format.
+    pub fn rules(&self) -> &'static dyn crate::rules::FormatRules {
+        crate::rules::rules(self.variant)
+    }
+
+    /// Checks internal consistency: generic limits here, format-specific rules in the
+    /// format's [`FormatRules::validate`](crate::rules::FormatRules::validate).
     pub fn validate(&self) -> Result<(), FormatError> {
         let seats = self.max_seats as usize;
         if !(2..=MAX_SEATS).contains(&seats) {
@@ -102,38 +91,14 @@ impl GameFormat {
             )));
         }
         let hc = self.hole_cards as usize;
-        match self.variant {
-            Variant::NLHE | Variant::FLHE if hc != 2 => {
-                return Err(FormatError("Hold'em needs 2 hole cards".into()))
-            }
-            Variant::PLO if !(4..=MAX_HOLE).contains(&hc) => {
-                return Err(FormatError("Omaha needs 4..=6 hole cards".into()))
-            }
-            _ => {}
+        if !(1..=MAX_HOLE).contains(&hc) {
+            return Err(FormatError(format!(
+                "hole_cards {hc} not in 1..={MAX_HOLE}"
+            )));
         }
         if seats * hc + 5 > 52 {
             return Err(FormatError("not enough cards for this many seats".into()));
         }
-        match (self.variant, self.betting) {
-            (
-                Variant::FLHE,
-                Betting::FixedLimit {
-                    small_bet,
-                    big_bet,
-                    cap,
-                },
-            ) if small_bet == 0 || big_bet == 0 || cap == 0 => {
-                return Err(FormatError("fixed-limit sizes and cap must be > 0".into()));
-            }
-            (Variant::FLHE, Betting::FixedLimit { .. }) => {}
-            (Variant::FLHE, _) => return Err(FormatError("FLHE needs FixedLimit betting".into())),
-            (_, Betting::FixedLimit { .. }) => {
-                return Err(FormatError(
-                    "FixedLimit betting is only supported for FLHE".into(),
-                ))
-            }
-            _ => {}
-        }
-        Ok(())
+        self.rules().validate(self)
     }
 }

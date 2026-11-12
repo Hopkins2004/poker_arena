@@ -18,11 +18,11 @@ kind = "python:examples.pot_odds_bot.PotOdds"
 params = { samples = 100 }
 [[bots]]
 name = "tag"
-kind = "python:pokerarena.baselines.TightAggressive"
+kind = "python:bots.NLH.tag.TightAggressive"
 anchor = 1300
 [[bots]]
 name = "station"
-kind = "python:pokerarena.baselines.CallingStation"
+kind = "python:bots.NLH.calling_station.CallingStation"
 anchor = 400
 """
 

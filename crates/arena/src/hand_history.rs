@@ -7,7 +7,6 @@
 use engine::action::{ActionKind, Street};
 use engine::card::Card;
 use engine::eval::category;
-use engine::format::{Betting, Variant};
 use engine::{HandSetup, HandState, SeatStatus};
 use std::fmt::Write;
 
@@ -39,12 +38,7 @@ impl HandHistoryWriter {
     pub fn write_hand(&mut self, hand_id: u64, st: &HandState, setup: &HandSetup, names: &[&str]) {
         let o = &mut self.out;
         let fmt = st.format();
-        let game = match (fmt.variant, fmt.betting) {
-            (Variant::NLHE, _) => "Hold'em No Limit",
-            (Variant::PLO, _) => "Omaha Pot Limit",
-            (Variant::FLHE, Betting::FixedLimit { .. }) => "Hold'em Limit",
-            (Variant::FLHE, _) => "Hold'em",
-        };
+        let game = fmt.rules().title();
         let n = setup.n_seats;
         let _ = writeln!(
             o,

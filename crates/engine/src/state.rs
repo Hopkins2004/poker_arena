@@ -4,6 +4,9 @@
 //! A [`HandState`] is reusable: call [`HandState::start`] for every hand; it resets its fixed
 //! arrays and clears (without freeing) its history buffer, so the hot path does not allocate.
 //!
+//! Everything that differs between formats (showdown evaluation, raise sizes, caps, action
+//! validation) is delegated to [`crate::rules`]; this file is the format-independent flow.
+//!
 //! Rules implemented (each is covered by scripted tests in `tests/scripted.rs`):
 //! * Heads-up, the button posts the small blind, acts first preflop and last postflop.
 //! * Minimum raise: the increment must be at least the largest previous full bet/raise
@@ -21,8 +24,10 @@
 use crate::action::{Action, ActionKind, ActionRecord, IllegalAction, LegalActions, Street};
 use crate::card::Card;
 use crate::deck::Deck;
-use crate::eval::{Evaluator, HandAcc, Strength};
-use crate::format::{Betting, GameFormat, Variant, MAX_HOLE, MAX_SEATS};
+use crate::eval::{Evaluator, Strength};
+use crate::format::{GameFormat, MAX_HOLE, MAX_SEATS};
+use crate::rules::actions::{legal_actions, resolve, PlayerView, Resolved};
+use crate::rules::betting::{BetContext, BettingRules};
 
 /// Per-seat status within a hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -143,6 +148,8 @@ pub struct HandState {
     stacks: [u64; MAX_SEATS],
     street_contrib: [u64; MAX_SEATS],
     total_contrib: [u64; MAX_SEATS],
+    /// Running sum of `total_contrib` (kept in sync wherever chips move; checked in debug).
+    pot_total: u64,
     status: [SeatStatus; MAX_SEATS],
     hole: [[Card; MAX_HOLE]; MAX_SEATS],
     board: [Card; 5],
@@ -195,6 +202,7 @@ impl HandState {
             stacks: [0; MAX_SEATS],
             street_contrib: [0; MAX_SEATS],
             total_contrib: [0; MAX_SEATS],
+            pot_total: 0,
             status: [SeatStatus::Empty; MAX_SEATS],
             hole: [[Card(0); MAX_HOLE]; MAX_SEATS],
             board: [Card(0); 5],
@@ -252,6 +260,7 @@ impl HandState {
         self.stacks = self.start_stacks;
         self.street_contrib = [0; MAX_SEATS];
         self.total_contrib = [0; MAX_SEATS];
+        self.pot_total = 0;
         self.acted = [false; MAX_SEATS];
         self.acted_at = [0; MAX_SEATS];
         self.needs_action = [false; MAX_SEATS];
@@ -317,11 +326,8 @@ impl HandState {
         // The big blind is the opening bet: players must call the full blind even if the
         // big blind is all-in for less, and the minimum raise increment is one big blind.
         self.current_bet = self.bb;
-        self.last_raise = self.bb;
+        self.last_raise = self.fmt.betting.opening_increment(Street::Preflop, self.bb);
         self.bets_this_street = 1;
-        if let Betting::FixedLimit { small_bet, .. } = self.fmt.betting {
-            self.last_raise = small_bet;
-        }
         self.begin_betting_round();
         let from = self.bb_seat;
         self.advance(from);
@@ -345,6 +351,7 @@ impl HandState {
         let a = amount.min(self.stacks[seat]);
         self.stacks[seat] -= a;
         self.total_contrib[seat] += a;
+        self.pot_total += a;
         if live {
             self.street_contrib[seat] += a;
         }
@@ -421,18 +428,7 @@ impl HandState {
                     self.bets_this_street = 0;
                     self.acted = [false; MAX_SEATS];
                     self.acted_at = [0; MAX_SEATS];
-                    self.last_raise = match self.fmt.betting {
-                        Betting::FixedLimit {
-                            small_bet, big_bet, ..
-                        } => {
-                            if next >= Street::Turn {
-                                big_bet
-                            } else {
-                                small_bet
-                            }
-                        }
-                        _ => self.bb,
-                    };
+                    self.last_raise = self.fmt.betting.opening_increment(next, self.bb);
                     // If fewer than two players can bet, this marks nobody and the loop
                     // runs the board out street by street.
                     self.begin_betting_round();
@@ -454,77 +450,43 @@ impl HandState {
         self.complete
     }
 
-    /// Fixed-limit bet size for the current street.
-    fn fl_size(&self) -> u64 {
-        match self.fmt.betting {
-            Betting::FixedLimit {
-                small_bet, big_bet, ..
-            } => {
-                if self.street >= Street::Turn {
-                    big_bet
-                } else {
-                    small_bet
-                }
-            }
-            _ => 0,
-        }
-    }
-
     /// Total chips in the pot (all streets, including current bets).
     #[inline]
     pub fn pot(&self) -> u64 {
-        self.total_contrib[..self.n_seats].iter().sum()
+        self.pot_total
     }
 
-    /// Legal actions for `seat` (all-false/zero if it is not that seat's turn).
+    /// Legal actions for `seat` (all-false/zero if it is not that seat's turn). The betting
+    /// structure decides raise sizes and caps ([`crate::rules::betting`]); the rest is
+    /// structure-independent ([`crate::rules::actions::legal_actions`]).
     pub fn legal_actions_for(&self, seat: usize) -> LegalActions {
         if self.to_act != Some(seat) {
             return LegalActions::default();
         }
+        let (ctx, player) = self.bet_view(seat);
+        legal_actions(&self.fmt.betting, &ctx, &player)
+    }
+
+    fn bet_view(&self, seat: usize) -> (BetContext, PlayerView) {
         let contrib = self.street_contrib[seat];
-        let stack = self.stacks[seat];
-        let to_call_raw = self.current_bet.saturating_sub(contrib);
-        let call_amount = to_call_raw.min(stack);
-        let can_check = to_call_raw == 0;
-        let allin_to = contrib + stack;
-
-        // Betting is (re)opened for this seat if it has not acted on this street, or if it
-        // now faces at least a full raise since it last acted (short all-ins don't reopen).
-        let reopened =
-            !self.acted[seat] || self.current_bet - self.acted_at[seat] >= self.last_raise;
-        let other_can_respond =
-            (0..self.n_seats).any(|s| s != seat && self.status[s] == SeatStatus::Active);
-        let cap_ok = match self.fmt.betting {
-            Betting::FixedLimit { cap, .. } => self.bets_this_street < cap,
-            _ => true,
+        let ctx = BetContext {
+            street: self.street,
+            bb: self.bb,
+            current_bet: self.current_bet,
+            last_raise: self.last_raise,
+            bets_this_street: self.bets_this_street,
+            pot: self.pot(),
+            to_call: self.current_bet.saturating_sub(contrib),
         };
-        let can_raise = stack > to_call_raw && reopened && other_can_respond && cap_ok;
-
-        let (mut min_to, mut max_to) = (0, 0);
-        if can_raise {
-            let (lo, hi) = match self.fmt.betting {
-                Betting::NoLimit => (self.current_bet + self.last_raise, allin_to),
-                Betting::PotLimit => (
-                    self.current_bet + self.last_raise,
-                    // Pot-limit: max raise-to = call amount + (pot after calling) on top of
-                    // the current bet.
-                    self.current_bet + self.pot() + to_call_raw,
-                ),
-                Betting::FixedLimit { .. } => {
-                    let to = self.current_bet + self.fl_size();
-                    (to, to)
-                }
-            };
-            min_to = lo.min(allin_to);
-            max_to = hi.min(allin_to).max(min_to);
-        }
-        LegalActions {
-            can_check,
-            call_amount,
-            can_raise,
-            min_raise_to: min_to,
-            max_raise_to: max_to,
-        }
+        let player = PlayerView {
+            street_contrib: contrib,
+            stack: self.stacks[seat],
+            acted: self.acted[seat],
+            acted_at: self.acted_at[seat],
+            others_can_respond: (0..self.n_seats)
+                .any(|s| s != seat && self.status[s] == SeatStatus::Active),
+        };
+        (ctx, player)
     }
 
     /// Legal actions for the player to act.
@@ -541,50 +503,14 @@ impl HandState {
         self.resolve(action).map(|_| ())
     }
 
-    /// Resolves an action into (kind, raise-to amount for bets/raises).
+    /// Validates an action ([`crate::rules::actions::resolve`]).
     fn resolve(&self, action: Action) -> Result<Resolved, IllegalAction> {
         let Some(seat) = self.to_act else {
             return Err(IllegalAction::NotToAct);
         };
         let la = self.legal_actions_for(seat);
         let allin_to = self.street_contrib[seat] + self.stacks[seat];
-        match action {
-            Action::Fold => Ok(Resolved::Fold),
-            Action::Check => {
-                if la.can_check {
-                    Ok(Resolved::Check)
-                } else {
-                    Err(IllegalAction::CannotCheck)
-                }
-            }
-            Action::Call => Ok(if la.can_check {
-                Resolved::Check
-            } else {
-                Resolved::Call
-            }),
-            Action::BetTo(x) | Action::RaiseTo(x) => {
-                if !la.can_raise {
-                    Err(IllegalAction::RaiseNotAllowed)
-                } else if x < la.min_raise_to {
-                    Err(IllegalAction::BelowMinRaise)
-                } else if x > la.max_raise_to {
-                    Err(IllegalAction::AboveMaxRaise)
-                } else {
-                    Ok(Resolved::RaiseTo(x))
-                }
-            }
-            Action::AllIn => {
-                if allin_to <= self.current_bet {
-                    Ok(Resolved::Call)
-                } else if !la.can_raise {
-                    Err(IllegalAction::RaiseNotAllowed)
-                } else if allin_to > la.max_raise_to {
-                    Err(IllegalAction::AboveMaxRaise)
-                } else {
-                    Ok(Resolved::RaiseTo(allin_to))
-                }
-            }
-        }
+        resolve(action, &la, allin_to, self.current_bet)
     }
 
     /// Applies an action for the player to act. Illegal actions are rejected without
@@ -644,6 +570,7 @@ impl HandState {
         self.stacks[seat] -= add;
         self.street_contrib[seat] += add;
         self.total_contrib[seat] += add;
+        self.pot_total += add;
         if self.stacks[seat] == 0 {
             self.status[seat] = SeatStatus::AllIn;
             true
@@ -685,6 +612,7 @@ impl HandState {
         let excess = self.total_contrib[top] - second;
         if excess > 0 {
             self.total_contrib[top] -= excess;
+            self.pot_total -= excess;
             self.stacks[top] += excess;
             self.uncalled = Some((top, excess));
         }
@@ -697,16 +625,11 @@ impl HandState {
             self.street = Street::River;
             let board = self.board;
             let hc = self.fmt.hole_cards as usize;
-            let board_acc = HandAcc::from_cards(&board);
+            let rules = self.fmt.rules();
             for s in 0..n {
                 if self.status[s].is_live() {
                     let hole = &self.hole[s][..hc];
-                    self.strengths[s] = match self.fmt.variant {
-                        Variant::NLHE | Variant::FLHE => self
-                            .ev
-                            .eval_acc(HandAcc::from_cards(hole).combine(board_acc)),
-                        Variant::PLO => self.ev.eval_omaha(hole, &board),
-                    };
+                    self.strengths[s] = rules.strength(self.ev, hole, &board);
                 }
             }
         }
@@ -804,6 +727,7 @@ impl HandState {
             }
         }
         self.total_contrib = [0; MAX_SEATS];
+        self.pot_total = 0;
         self.street_contrib = [0; MAX_SEATS];
         self.debug_check_conservation();
     }
@@ -815,6 +739,8 @@ impl HandState {
             let start: u64 = self.start_stacks[..self.n_seats].iter().sum();
             let now: u64 = self.stacks[..self.n_seats].iter().sum::<u64>() + self.pot();
             assert_eq!(start, now, "chip conservation violated");
+            let summed: u64 = self.total_contrib[..self.n_seats].iter().sum();
+            assert_eq!(self.pot_total, summed, "running pot total out of sync");
         }
     }
 
@@ -956,12 +882,4 @@ impl HandState {
     pub fn uncalled_return(&self) -> Option<(usize, u64)> {
         self.uncalled
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Resolved {
-    Fold,
-    Check,
-    Call,
-    RaiseTo(u64),
 }

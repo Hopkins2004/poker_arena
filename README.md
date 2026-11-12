@@ -11,10 +11,12 @@ the Rust engine deals, enforces the rules, runs tables in parallel processes and
 results. **[BOTS.md](BOTS.md) is the full bot-author guide.**
 
 ```
-crates/engine   cards, deck, hand evaluator, equity, game rules, hand state machine (no I/O, no threads)
+crates/engine   cards, deck, hand evaluator, equity, hand state machine (no I/O, no threads)
+                rules/: one file per format and per betting structure (see "Adding a format")
 crates/arena    Bot trait, table runner, stats, matchmaking, ratings, leaderboard, replays, config
 crates/cli      the `arena` binary: bench, leaderboard
-python/         PyO3 bindings (crate arena_py) + Python package `pokerarena` (baselines, runner, GUI)
+python/         PyO3 bindings (crate arena_py) + Python package `pokerarena` (runner, GUI, catalog)
+bots/NLH/       the bots, one file each (the three anchored baselines live here)
 macos/          sources of the double-click app (Poker Arena.app)
 configs/        example TOML configs
 ```
@@ -38,12 +40,13 @@ System Settings › Privacy & Security › Files & Folders.
   blinds), stack, blinds and ante, stack policy, duplicate mode, hands per table, rounds,
   players per table, minimum tables per round, Elo mode and K, seed, worker processes,
   decision timing, saving, and hand replays.
-- **Players:** each row is a baseline bot (tight-aggressive, random, calling station) or
-  any custom `module.ClassName`, with JSON params and an optional **anchor Elo**. A
-  read-only **Start Elo** column shows where each bot begins: its anchor, its saved rating,
-  or the initial 1500. Presets: the demo lineup (7 bots), the three anchored baselines,
-  champions (the tag variants), and the trio. A live preview shows tables per round and
-  total hands.
+- **Players:** one row per bot, with an editable name, the bot (a file in `bots/NLH`), its
+  **Anchor Elo** (declared by the bot file) and a read-only **Start Elo**. Start Elo is
+  where the bot begins: its anchor, its saved rating, or the initial 1500. **Add bot**
+  offers every bot in `bots/NLH`, so drop a new `.py` file there to make it available. A
+  second copy of a bot gets a numbered name (`tag_2`). **Reset to anchored bots** restores
+  the default lineup. Bot parameters are hardcoded in the bot files, so the app has nothing
+  to tune per bot. A live preview shows tables per round and total hands.
 - **Save results & leaderboard:** bots start from their Elo in `leaderboard.json` when they
   have one (anchors always win). At the end the app writes `results/<run_id>/` and updates
   the leaderboard.
@@ -117,26 +120,31 @@ Apple M4 Pro (8 performance + 4 efficiency cores), release build:
 | 7-card evaluator, random hands | 460–480 M evals/s | 4.0–4.2 G evals/s (8.7×) |
 | Engine + runner, 6-max NLHE, built-in random policy (`arena bench`) | 1.07–1.14 M hands/s | 7.2–8.4 M hands/s |
 
-The bare engine loop (no bot dispatch, no event broadcast) runs 1.9 M 6-max hands/s on one
-core. With real Python bots, the bots dominate. The 7-bot demo (`configs/6max_nlh.toml`,
-6-max NLHE, 5 rounds) runs at about **195k hands/s** at 20,000 hands per table, and about
-90k hands/s at 1,000 hands per table, where worker start-up dominates. A Python decision
+The bare engine loop (no bot dispatch, no event broadcast) runs 2.0 M 6-max hands/s on one
+core. With real Python bots, the bots dominate. The default lineup (the 3 anchored bots,
+6-max NLHE) runs at about **82k hands/s** with the default schedule. That schedule has only
+3 tables per round, so only 3 cores work. Raising **Min tables per round** to 12 uses every
+core: about **210k hands/s**. A Python decision
 costs about 1.1 µs for a trivial bot and 3–5 µs for the tight-aggressive baseline, whose
 equity sampling runs in Rust.
 
-## Baseline bots and anchors
+## Bots folder, baselines and anchors
 
-`pokerarena.baselines` holds the three baselines. Their Elo is **anchored** (fixed) in the
-shipped configs and the app:
+Bots live in **`bots/<FORMAT>/`**, one file per bot. `bots/NLH` holds the three anchored
+baselines:
 
-| Bot | Class | Anchor Elo | Params |
-|---|---|---|---|
-| `random` | `RandomLegal` | 850 | `fold`, `call`, `raise` weights; `raise_sizes` (pot fractions) |
-| `station` | `CallingStation` | 400 | none |
-| `tag` | `TightAggressive` | 1300 | `samples`, `tightness`, `call_margin` |
+| File | Class | Name | Anchor Elo | Play |
+|---|---|---|---|---|
+| `bots/NLH/random_legal.py` | `RandomLegal` | `random` | 850 | fold / call / raise at random (1 : 2 : 1), 0.5 or 1 pot |
+| `bots/NLH/calling_station.py` | `CallingStation` | `station` | 400 | always checks or calls |
+| `bots/NLH/tag.py` | `TightAggressive` | `tag` | 1300 | Chen-formula preflop, Monte Carlo equity postflop (300 samples) |
 
-`TightAggressive` uses Chen-formula hand classes preflop, and Monte Carlo equity against the
-live opponents postflop (and preflop in PLO).
+A bot file defines one class with an `act` method. Its parameters are class constants in the
+file, and two optional class attributes describe it: `NAME` (the default player name) and
+`ANCHOR` (a fixed Elo). `pokerarena.discover()` lists the bots in a folder, and the app's
+**Add bot** uses it. Config kinds are `python:bots.NLH.<file>.<Class>`. Importing
+`pokerarena` puts the repository root on `sys.path`, so `bots` is importable, worker
+processes included. BOTS.md covers writing one.
 
 An anchored bot still enters every expected-score computation, but its own rating never
 changes, so the anchors pin the scale and ratings stay comparable across runs and
@@ -156,7 +164,7 @@ replay_hands_per_bot = 0      # > 0: save that many random hands per bot (hand r
 replays_dir = "hand_replays"
 
 [format]
-variant = "nlhe"              # nlhe | plo | flhe
+variant = "nlhe"              # a registered format: nlhe | plo | flhe
 max_seats = 6                 # 2..=10
 # hole_cards = 4              # plo only (4..=6)
 # small_bet = 2, big_bet = 4, cap = 4   # flhe only (defaults: bb, 2*small_bet, 4)
@@ -190,19 +198,49 @@ margin_c = 30
 [[bots]]
 name = "tag"
 # version = "1"               # optional; leaderboard key becomes "tag@1"
-kind = "python:pokerarena.baselines.TightAggressive"   # python:module.ClassName
-params = { samples = 300 }    # passed to the constructor as keyword arguments
-anchor = 1300                 # optional fixed Elo
+kind = "python:bots.NLH.tag.TightAggressive"   # python:module.ClassName
+anchor = 1300                 # optional fixed Elo (the bot file's ANCHOR)
+# params = { ... }            # optional constructor keyword arguments (custom bots only;
+                              # the bots in bots/NLH hardcode their parameters)
 ```
 
 Unknown keys are rejected, and every bot must be a `python:` kind. Duplicate mode requires
-`reset_each_hand` and is not available for tournaments. Example configs:
+`reset_each_hand` and is not available for tournaments. Example configs, all with the three
+anchored bots:
 
-- `configs/6max_nlh.toml`: the 7-bot demo (the three anchored baselines plus four variants).
+- `configs/6max_nlh.toml`: the app's default settings.
 - `configs/hu_nlh.toml`: heads-up with duplicate mode and margin Elo.
 - `configs/6max_plo.toml`
 - `configs/tournament_6max.toml`
-- `configs/trio.toml`
+
+## Adding a format
+
+Everything that differs between poker formats lives in `crates/engine/src/rules/`. The
+hand state machine (`state.rs`) is format-independent and asks these modules:
+
+```
+rules/mod.rs          FormatRules trait + registry (rules(variant), by_name("plo"), ALL)
+rules/formats/nlhe.rs  No-Limit Hold'em: 2 hole cards, Hold'em showdown, no-limit betting
+rules/formats/plo.rs   Pot-Limit Omaha: 4 hole cards, exactly-2-plus-3 showdown, pot-limit
+rules/formats/flhe.rs  Fixed-Limit Hold'em: 2 hole cards, Hold'em showdown, fixed-limit
+rules/betting/         one file per betting structure (BettingRules: opening bet, legal
+                       raise range, cap): no_limit.rs, pot_limit.rs, fixed_limit.rs
+rules/actions.rs       structure-independent action logic: legal_actions() computes what the
+                       player to act may do; resolve() validates the action a bot returned
+```
+
+A format implements `FormatRules`: its name and title, its standard `GameFormat` (hole
+cards and betting structure), validation, showdown strength and Monte Carlo equity. The
+last two pass a statically dispatched evaluator to shared generic code. To add one:
+
+1. Write `rules/formats/<name>.rs` implementing `FormatRules` (copy `nlhe.rs`).
+2. Add a variant to `Variant` and one line each to `rules()` and `ALL` in `rules/mod.rs`.
+3. If it needs a new betting structure, add `rules/betting/<name>.rs` implementing
+   `BettingRules` and a `Betting` variant.
+
+Configs (`variant = "<name>"`), hand histories, the Python bindings and `equity(...,
+variant=...)` all look formats up through the registry, so nothing else changes. Add
+scripted hands for the new rules in `crates/engine/tests/scripted.rs`.
 
 ## Matchmaking
 
@@ -252,8 +290,8 @@ total rating is not conserved. Defaults: initial 1500, K = 16.
 a rating difference means: the 400-point logistic scale is what makes ratings comparable to
 chess (400 points ≈ 91% expected score). Each table splits K across the other n−1 bots, so
 the chess-equivalent K per pairwise comparison is K/(n−1), about K/5 at 6-max. Chess uses
-10–40 per game. These figures were measured on the 7-bot demo (60 rounds of 1,000 hands per
-table, with the same strategies and no anchors):
+10–40 per game. These figures were measured on a 7-bot lineup (the three baseline
+strategies plus four variants; 60 rounds of 1,000 hands per table, no anchors):
 
 | K | rating noise (SD) | median move per round | rounds where the order changed |
 |---|---|---|---|

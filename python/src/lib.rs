@@ -232,11 +232,7 @@ fn status_u8(s: SeatStatus) -> u8 {
 }
 
 fn variant_str(v: Variant) -> &'static str {
-    match v {
-        Variant::NLHE => "nlhe",
-        Variant::PLO => "plo",
-        Variant::FLHE => "flhe",
-    }
+    engine::rules::rules(v).name()
 }
 
 fn build_observation(py: Python<'_>, o: &Observation) -> PyResult<PyObservation> {
@@ -958,16 +954,15 @@ fn equity(
 ) -> PyResult<f64> {
     let hole = to_cards(hole)?;
     let board = to_cards(board)?;
-    let v = match variant {
-        "nlhe" | "flhe" => Variant::NLHE,
-        "plo" => Variant::PLO,
-        _ => return Err(err(format!("unknown variant {variant:?}"))),
-    };
-    let needed = if v == Variant::PLO { 4 } else { 2 };
-    if hole.len() < 2 || (v == Variant::PLO && hole.len() < needed) || board.len() > 5 {
-        return Err(err(
-            "need 2 hole cards (4+ for plo) and at most 5 board cards",
-        ));
+    let rules = engine::rules::by_name(variant)
+        .ok_or_else(|| err(format!("unknown variant {variant:?}")))?;
+    let v = rules.variant();
+    let needed = rules.default_format(2).hole_cards as usize;
+    if hole.len() < needed || board.len() > 5 {
+        return Err(err(format!(
+            "need {needed} hole cards for {} and at most 5 board cards",
+            rules.name()
+        )));
     }
     let mut seen = engine::CardMask::EMPTY;
     for c in hole.iter().chain(&board) {

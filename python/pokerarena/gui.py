@@ -3,8 +3,8 @@
 Open it by double-clicking ``Poker Arena.app`` at the repository root, or with
 ``python -c "from pokerarena.gui import main; main()"``.
 
-Set up a run (game, tables, rating, and the players: the baselines in
-:mod:`pokerarena.baselines` or any ``module.ClassName``, optionally anchored at a fixed Elo),
+Set up a run (game, tables, rating, and the players: bots from the ``bots/NLH`` folder, whose
+parameters and anchor Elo are hardcoded in their files),
 press **Run**, watch the progress bar, and read the leaderboard at the end. With "Save
 results & leaderboard" on, bots start from their saved Elo. "Save 100 random hands per bot"
 writes hand replays to ``hand_replays/<run_id>/``. **Stop** is a hard stop: worker processes
@@ -49,43 +49,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import catalog
 from ._native import Run
 from .job import ArenaJob
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# (label, kind) shown in each player's "Bot" menu. CUSTOM enables the class column.
-PY = "python:pokerarena.baselines."
-CUSTOM = "Custom Python class…"
-BOT_CHOICES = [
-    ("Tight-aggressive", PY + "TightAggressive"),
-    ("Random", PY + "RandomLegal"),
-    ("Calling station", PY + "CallingStation"),
-    (CUSTOM, None),
-]
-KIND_TO_LABEL = {k: l for l, k in BOT_CHOICES if k}
-DEFAULT_PARAMS = {
-    PY + "TightAggressive": {"samples": 300, "tightness": 0.0, "call_margin": 0.05},
-    PY + "RandomLegal": {"fold": 1.0, "call": 2.0, "raise": 1.0, "raise_sizes": [0.5, 1.0]},
-    PY + "CallingStation": {},
-}
-
-# The anchored baselines: their Elo never moves and pins the scale.
-BASELINES = [
-    ("random", PY + "RandomLegal", {"fold": 1.0, "call": 2.0, "raise": 1.0, "raise_sizes": [0.5, 1.0]}, 850.0),
-    ("station", PY + "CallingStation", {}, 400.0),
-    ("tag", PY + "TightAggressive", {"samples": 300}, 1300.0),
-]
-_TAG_LOOSE = ("tag_loose", PY + "TightAggressive", {"samples": 200, "tightness": -3.0, "call_margin": 0.0}, None)
-_TAG_TIGHT = ("tag_tight", PY + "TightAggressive", {"samples": 300, "tightness": 2.0}, None)
-_RANDOM_PASSIVE = ("random_passive", PY + "RandomLegal",
-                   {"fold": 2.0, "call": 3.0, "raise": 0.2, "raise_sizes": [0.5]}, None)
-PRESETS = {
-    "Demo lineup (7 bots)": None,  # loaded from configs/6max_nlh.toml
-    "Baselines (3 anchored bots)": BASELINES,
-    "Champions: tag variants (3 bots)": [BASELINES[2], _TAG_LOOSE, _TAG_TIGHT],
-    "Trio (3 bots)": [_TAG_LOOSE, _RANDOM_PASSIVE, BASELINES[1]],
-}
+REPLAY_HANDS_PER_BOT = 100
 
 FALLBACK_CONFIG = {
     "run": {"rounds": 5, "seed": 2026, "results_dir": "results", "leaderboard": "leaderboard.json"},
@@ -96,19 +66,21 @@ FALLBACK_CONFIG = {
     "matchmaking": {"min_appearances": 4, "allow_duplicate_bot_at_table": True, "min_tables": 0,
                     "balance_pairs": True},
     "rating": {"k": 16.0, "score_mode": "binary"},
-    "bots": [{"name": n, "kind": k, "params": p, "anchor": a} for n, k, p, a in BASELINES],
+    "bots": [],  # filled with the anchored bots from bots/NLH
 }
-
-REPLAY_HANDS_PER_BOT = 100
 
 
 def load_default_config() -> dict:
+    """Settings from configs/6max_nlh.toml (or built-in defaults); the lineup is always the
+    anchored bots found in bots/NLH."""
     path = REPO_ROOT / "configs" / "6max_nlh.toml"
     try:
         with open(path, "rb") as f:
-            return tomllib.load(f)
-    except OSError:
-        return copy.deepcopy(FALLBACK_CONFIG)
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        cfg = copy.deepcopy(FALLBACK_CONFIG)
+    cfg["bots"] = catalog.anchored_lineup()
+    return cfg
 
 
 def blind_levels(sb: int, bb: int, ante: int, hands: int) -> list:
@@ -156,78 +128,66 @@ def _fmt_rate(x: float) -> str:
 
 
 class PlayersTable(QTableWidget):
-    """Editable list of bots: name, bot type, custom Python class, JSON params, optional
-    anchor Elo, and the (read-only) Elo the bot will start the run with."""
+    """The run's players: name (editable), bot (a file in bots/NLH), anchor Elo (declared by
+    the bot file) and the Elo the bot will start the run with. Bot parameters are hardcoded
+    in the bot files; there is nothing else to edit here."""
 
-    COLS = ["Name", "Bot", "Python class (custom)", "Params (JSON)", "Anchor Elo", "Start Elo", ""]
-    ANCHOR, START, REMOVE = 4, 5, 6
+    COLS = ["Name", "Bot", "Anchor Elo", "Start Elo", ""]
+    NAME, BOT, ANCHOR, START, REMOVE = range(5)
+    KIND_ROLE = Qt.ItemDataRole.UserRole
+    VERSION_ROLE = Qt.ItemDataRole.UserRole + 1
+    ANCHOR_ROLE = Qt.ItemDataRole.UserRole + 2
 
-    def __init__(self, on_change):
+    def __init__(self, on_change, labels: dict):
         super().__init__(0, len(self.COLS))
         self.on_change = on_change
+        self.labels = labels  # kind -> human label
         self.setHorizontalHeaderLabels(self.COLS)
         h = self.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        h.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(self.NAME, QHeaderView.ResizeMode.Interactive)
+        h.setSectionResizeMode(self.BOT, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(self.ANCHOR, QHeaderView.ResizeMode.Interactive)
         h.setSectionResizeMode(self.START, QHeaderView.ResizeMode.Interactive)
         h.setSectionResizeMode(self.REMOVE, QHeaderView.ResizeMode.ResizeToContents)
+        self.setColumnWidth(self.NAME, 160)
         self.setColumnWidth(self.ANCHOR, 90)
         self.setColumnWidth(self.START, 130)
         self.horizontalHeaderItem(self.ANCHOR).setToolTip(
-            "Optional fixed Elo. An anchored bot's rating never changes; it pins the scale.")
+            "Fixed Elo declared by the bot file (ANCHOR). An anchored bot's rating never "
+            "changes; it pins the scale.")
         self.horizontalHeaderItem(self.START).setToolTip(
             "Elo the bot starts this run with: its anchor, else its saved rating (when "
             "'Save results & leaderboard' is on and it has one), else the initial rating.")
-        self.setColumnWidth(0, 150)
-        self.setColumnWidth(2, 210)
         self.verticalHeader().setVisible(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.itemChanged.connect(lambda *_: self.on_change())
 
-    def add_bot(self, name: str, kind: str, params: dict, version=None, anchor=None) -> None:
+    @staticmethod
+    def _readonly(text: str) -> QTableWidgetItem:
+        item = QTableWidgetItem(text)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        return item
+
+    def add_bot(self, name: str, kind: str, anchor=None, version=None) -> None:
         r = self.rowCount()
         self.blockSignals(True)
         self.insertRow(r)
         name_item = QTableWidgetItem(name)
-        name_item.setData(Qt.ItemDataRole.UserRole, version)
-        self.setItem(r, 0, name_item)
-        combo = _combo([(label, kind_ or "") for label, kind_ in BOT_CHOICES])
-        custom = QLineEdit()
-        if kind in KIND_TO_LABEL:
-            _set_combo(combo, kind)
-            custom.setEnabled(False)
-        else:
-            _set_combo(combo, "")
-            custom.setText(kind.removeprefix("python:"))
-            custom.setPlaceholderText("module.ClassName")
-        self.setCellWidget(r, 1, combo)
-        self.setCellWidget(r, 2, custom)
-        self.setItem(r, 3, QTableWidgetItem(json.dumps(params or {})))
-        self.setItem(r, self.ANCHOR, QTableWidgetItem("" if anchor is None else f"{float(anchor):g}"))
-        start = QTableWidgetItem("")
-        start.setFlags(Qt.ItemFlag.ItemIsEnabled)
-        self.setItem(r, self.START, start)
+        name_item.setData(self.KIND_ROLE, kind)
+        name_item.setData(self.VERSION_ROLE, version)
+        name_item.setData(self.ANCHOR_ROLE, None if anchor is None else float(anchor))
+        self.setItem(r, self.NAME, name_item)
+        bot = self._readonly(self.labels.get(kind, kind.removeprefix("python:")))
+        bot.setToolTip(kind)
+        self.setItem(r, self.BOT, bot)
+        self.setItem(r, self.ANCHOR, self._readonly("—" if anchor is None else f"{float(anchor):g}"))
+        self.setItem(r, self.START, self._readonly(""))
         remove = QPushButton("✕")
         remove.setToolTip("Remove this bot")
         remove.setFixedWidth(34)
+        remove.clicked.connect(lambda *_, b=remove: self._remove(b))
         self.setCellWidget(r, self.REMOVE, remove)
         self.blockSignals(False)
-
-        def kind_changed(_i, combo=combo, custom=custom):
-            k = combo.currentData()
-            custom.setEnabled(not k)
-            custom.setPlaceholderText("" if k else "module.ClassName")
-            row = self.indexAt(combo.pos()).row()
-            if k and row >= 0:
-                self.item(row, 3).setText(json.dumps(DEFAULT_PARAMS.get(k, {})))
-            self.on_change()
-
-        combo.currentIndexChanged.connect(kind_changed)
-        custom.textChanged.connect(lambda *_: self.on_change())
-        remove.clicked.connect(lambda *_, b=remove: self._remove(b))
         self.on_change()
 
     def _remove(self, button) -> None:
@@ -239,39 +199,29 @@ class PlayersTable(QTableWidget):
     def set_bots(self, bots) -> None:
         self.setRowCount(0)
         for b in bots:
-            self.add_bot(b["name"], b["kind"], b.get("params") or {}, b.get("version"),
-                         b.get("anchor"))
+            self.add_bot(b["name"], b["kind"], b.get("anchor"), b.get("version"))
+        self.on_change()
+
+    def names(self) -> list:
+        return [(self.item(r, self.NAME).text().strip() if self.item(r, self.NAME) else "")
+                for r in range(self.rowCount())]
 
     def bots(self) -> list:
         """Reads the table; raises ValueError with a readable message on bad input."""
-        out = []
+        out, seen = [], set()
         for r in range(self.rowCount()):
-            name = (self.item(r, 0).text() if self.item(r, 0) else "").strip()
+            item = self.item(r, self.NAME)
+            name = item.text().strip()
             if not name:
                 raise ValueError(f"player {r + 1} needs a name")
-            kind = self.cellWidget(r, 1).currentData()
-            if not kind:
-                cls = self.cellWidget(r, 2).text().strip()
-                if "." not in cls:
-                    raise ValueError(f"{name}: enter a Python class as module.ClassName")
-                kind = "python:" + cls
-            text = self.item(r, 3).text().strip() if self.item(r, 3) else ""
-            try:
-                params = json.loads(text) if text else {}
-            except json.JSONDecodeError as e:
-                raise ValueError(f"{name}: params are not valid JSON ({e.msg})") from None
-            if not isinstance(params, dict):
-                raise ValueError(f"{name}: params must be a JSON object, e.g. {{}}")
-            bot = {"name": name, "kind": kind, "params": params}
-            anchor_text = self.item(r, self.ANCHOR).text().strip() if self.item(r, self.ANCHOR) else ""
-            if anchor_text:
-                try:
-                    bot["anchor"] = float(anchor_text)
-                except ValueError:
-                    raise ValueError(f"{name}: anchor Elo must be a number (or empty)") from None
-            version = self.item(r, 0).data(Qt.ItemDataRole.UserRole)
-            if version:
-                bot["version"] = str(version)
+            if name in seen:
+                raise ValueError(f"two players are named {name!r}; names must be unique")
+            seen.add(name)
+            bot = {"name": name, "kind": item.data(self.KIND_ROLE)}
+            if item.data(self.ANCHOR_ROLE) is not None:
+                bot["anchor"] = float(item.data(self.ANCHOR_ROLE))
+            if item.data(self.VERSION_ROLE):
+                bot["version"] = str(item.data(self.VERSION_ROLE))
             out.append(bot)
         return out
 
@@ -294,6 +244,7 @@ class ArenaWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Poker Arena")
+        self.catalog = catalog.discover()
         self.default_cfg = load_default_config()
         self.base_cfg = copy.deepcopy(self.default_cfg)
         self.job: ArenaJob | None = None
@@ -381,26 +332,37 @@ class ArenaWindow(QMainWindow):
         settings.addWidget(self._group("Run", runf))
         root.addLayout(settings)
 
-        # --- players
+        # --- players: bots come from the files in bots/NLH
         players_box = QGroupBox("Players")
         pv = QVBoxLayout(players_box)
         bar = QHBoxLayout()
-        self.preset = QComboBox()
-        self.preset.addItems(list(PRESETS))
-        load_preset = QPushButton("Load preset")
-        load_preset.clicked.connect(self.load_preset)
+        self.catalog_box = QComboBox()
+        for b in self.catalog:
+            anchor = "" if b.anchor is None else f"  ·  anchor {b.anchor:g}"
+            self.catalog_box.addItem(f"{b.name}{anchor}  —  {b.label}", b.kind)
+            self.catalog_box.setItemData(self.catalog_box.count() - 1, b.path,
+                                         Qt.ItemDataRole.ToolTipRole)
+        self.catalog_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         add = QPushButton("+ Add bot")
+        add.setToolTip(f"Adds the selected bot from {catalog.BOTS_DIR / catalog.DEFAULT_FORMAT_DIR}")
         add.clicked.connect(self.add_bot)
+        self.add_btn = add
+        reset = QPushButton("Reset to anchored bots")
+        reset.clicked.connect(self.reset_lineup)
         self.nbots = QLabel()
-        bar.addWidget(QLabel("Preset:"))
-        bar.addWidget(self.preset)
-        bar.addWidget(load_preset)
+        bar.addWidget(QLabel("Bot:"))
+        bar.addWidget(self.catalog_box)
+        bar.addWidget(add)
         bar.addStretch(1)
         bar.addWidget(self.nbots)
-        bar.addWidget(add)
+        bar.addWidget(reset)
         pv.addLayout(bar)
-        self.players = PlayersTable(self.changed)
+        self.players = PlayersTable(self.changed, {b.kind: f"{b.name} — {b.label}" for b in self.catalog})
         pv.addWidget(self.players)
+        folder = QLabel(f"Bots folder: {catalog.BOTS_DIR / catalog.DEFAULT_FORMAT_DIR}  "
+                        "(add a .py file there to make a new bot available)")
+        folder.setStyleSheet("color: gray;")
+        pv.addWidget(folder)
 
         # --- run controls + leaderboard
         run_box = QWidget()
@@ -518,26 +480,20 @@ class ArenaWindow(QMainWindow):
         self.players.set_bots(cfg.get("bots", []))
         self.changed()
 
-    def load_preset(self) -> None:
-        bots = PRESETS[self.preset.currentText()]
-        if bots is None:
-            self.players.set_bots(self.default_cfg.get("bots", []))
-        else:
-            self.players.set_bots([{"name": n, "kind": k, "params": dict(p), "anchor": a}
-                                   for n, k, p, a in bots])
+    def reset_lineup(self) -> None:
+        """Loads every anchored bot from the bots folder."""
+        self.players.set_bots(catalog.anchored_lineup())
 
     def add_bot(self) -> None:
-        names = {b for b in self._names()}
-        i = self.players.rowCount() + 1
-        while f"bot{i}" in names:
-            i += 1
-        self.players.add_bot(f"bot{i}", "random", DEFAULT_PARAMS["random"])
-
-    def _names(self):
-        for r in range(self.players.rowCount()):
-            it = self.players.item(r, 0)
-            if it:
-                yield it.text().strip()
+        kind = self.catalog_box.currentData()
+        info = next((b for b in self.catalog if b.kind == kind), None)
+        if info is None:
+            return
+        names = set(self.players.names())
+        name, i = info.name, 2
+        while name in names:
+            name, i = f"{info.name}_{i}", i + 1
+        self.players.add_bot(name, info.kind, info.anchor)
 
     def build_config(self) -> dict:
         cfg = copy.deepcopy(self.base_cfg)

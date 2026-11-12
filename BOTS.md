@@ -31,41 +31,54 @@ The complete example bot in §8 is real, tested code: `python/examples/pot_odds_
 A bot is a class with one required method, **`act(self, obs) -> action`**. The engine calls
 it whenever it is your turn and validates whatever you return. You never change game state
 yourself. Four optional hooks tell you about the match and the hand as it unfolds.
-Subclassing `pokerarena.BaseBot` gives you no-op hooks for free:
+Subclassing `pokerarena.BaseBot` gives you no-op hooks for free.
+
+**Bots live in `bots/NLH/`, one file per bot.** Create `bots/NLH/my_bot.py`:
 
 ```python
+"""My first bot."""
+
+import random
+
 from pokerarena import Action, BaseBot
 
+
 class MyBot(BaseBot):
-    def __init__(self, seed: int = 0, **params):
+    """Calls with any pair, otherwise checks or folds."""   # shown in the app's Add bot list
+
+    NAME = "mine"            # default player name (optional; defaults to the file name)
+    # ANCHOR = 1000          # only for reference bots: a fixed Elo that never moves
+
+    AGGRESSION = 0.7         # parameters are hardcoded constants in the file
+
+    def __init__(self, seed: int = 0):
         super().__init__(seed)
+        self.rng = random.Random(seed)
 
     def act(self, obs):
-        return Action.check() if obs.legal.can_check else Action.call()
+        pair = obs.hole[0] >> 2 == obs.hole[1] >> 2
+        if obs.legal.can_check:
+            return Action.check()
+        return Action.call() if pair else Action.fold()
 ```
 
-Put the class in a module the run can import (for example `mybots.py` at the repository
-root), then use it from a config, from the desktop app's player list (**Custom Python
-class…** → `mybots.MyBot`), or from `pokerarena.run`:
+That's all. The desktop app's **Add bot** list now offers `mine`. In a config, refer to it
+as `kind = "python:bots.NLH.my_bot.MyBot"`. Importing `pokerarena` makes the `bots`
+package importable, worker processes included.
 
-```toml
-[[bots]]
-name = "mine"
-kind = "python:mybots.MyBot"
-params = { aggression = 0.7 }     # passed to the constructor as keyword arguments
-```
-
-The baselines to measure against are in `pokerarena.baselines`: `RandomLegal`
-(Elo anchored at 850), `CallingStation` (400) and `TightAggressive` (1300).
+The anchored bots to measure against are in the same folder: `random_legal.py`
+(`RandomLegal`, anchored at Elo 850), `calling_station.py` (400) and `tag.py`
+(`TightAggressive`, 1300). They're also good templates.
 
 ## 2. Lifecycle: what is called, and when
 
 ### 2.1 Creation
 
 The arena never reuses a bot object across tables. **Every seat at every table gets a fresh
-instance**, constructed as **`ClassName(seed=<int>, **params)`**. The seed is derived from
-the master seed, the round, the table and the seat, and `params` is the `params` table
-from the config.
+instance**, constructed as **`ClassName(seed=<int>)`**. The seed is derived from the master
+seed, the round, the table and the seat. Keep parameters as constants in the bot file. The
+app has no per-bot settings. (A hand-written config may still pass `params = {...}` as extra
+keyword arguments to bots that accept them.)
 
 A bot's lifetime is one table, typically 1,000 to 100,000 hands (`hands_per_table`). State
 you keep in the object persists across those hands. Nothing persists across tables or
@@ -74,7 +87,9 @@ load it once into a module-level cache. Each worker process loads it once.
 
 Your class is also constructed once with `seed=0` when a run is set up, to fail fast on
 errors. The desktop app does the same each time you edit the settings, to refresh its
-preview. Keep constructors cheap and free of side effects.
+preview. Keep constructors cheap and free of side effects. The app also imports every file
+in `bots/NLH` to list them; a file that fails to import is skipped, with a warning in the
+log.
 
 ### 2.2 Calls during a table
 
@@ -324,12 +339,17 @@ PLO and duplicate mode) for leaked cards. You never see:
 
 **Amounts are raise-to totals for the street, not increments.** To raise by 10 over a bet
 of 6, return `raise_to(16)`, not `raise_to(10)`. The safe pattern is to compute a target and
-clamp it:
+clamp it. Two helpers do exactly that:
 
 ```python
-to = obs.current_bet + round(0.75 * (obs.pot + obs.legal.call_amount))   # 3/4 pot raise
-return Action.raise_to(min(max(to, obs.legal.min_raise_to), obs.legal.max_raise_to))
+from pokerarena import clamp_raise, pot_fraction_to
+
+return clamp_raise(obs, pot_fraction_to(obs, 0.75))   # 3/4-pot raise, clamped to the legal range
 ```
+
+`pot_fraction_to(obs, f)` is the raise-to total for a bet of `f` times the pot after
+calling. `clamp_raise(obs, to)` returns `Action.raise_to` clamped to
+`[min_raise_to, max_raise_to]`.
 
 A bet/raise is legal when `legal.can_raise and min_raise_to <= x <= max_raise_to`.
 
@@ -443,9 +463,10 @@ random) and 3–5 µs (tight-aggressive) per decision. Tips:
 **Where bots run.** Tables run in separate worker processes (a `spawn` multiprocessing
 pool, one table per task). Consequences:
 
-- **Your module must be importable by name** from the run's working directory. The desktop
-  app runs from the repository root, so a file `mybots.py` there is `python:mybots.MyBot`.
-  `python/examples/foo.py` is `python:examples.foo.Foo`, or install it as a package.
+- **Your module must be importable by name.** Bots in `bots/NLH/` always are:
+  `bots/NLH/my_bot.py` is `python:bots.NLH.my_bot.MyBot`, because importing `pokerarena`
+  puts the repository root on `sys.path`. Other modules must be importable from the run's
+  working directory, or installed.
 - **Module-level code runs once per worker.** Keep imports light.
 - **Scripts that start runs** (`pokerarena.run`, `ArenaJob`) must use
   `if __name__ == "__main__":`.
@@ -459,7 +480,8 @@ This bot calls when Monte Carlo equity beats the pot odds, value-raises strong h
 two-thirds of the pot, and tightens up when the hand has already been raised twice. It uses
 `new_hand` and `observe` to track raises, which is correct hand-scoped state.
 
-`python/examples/pot_odds_bot.py`:
+`python/examples/pot_odds_bot.py` (an example, kept outside `bots/NLH` so the app only offers
+the anchored bots; copy it into `bots/NLH/` to use it there):
 
 ```python
 import random
@@ -507,8 +529,8 @@ kind = "python:examples.pot_odds_bot.PotOdds"
 params = { samples = 200 }
 ```
 
-In the desktop app, add a player, choose **Custom Python class…**, and enter
-`examples.pot_odds_bot.PotOdds`.
+To use it in the desktop app, copy the file into `bots/NLH/`, move the `samples` parameter
+into a class constant, and pick it under **Add bot**.
 
 ## 9. Testing and evaluating your bot
 
@@ -517,7 +539,7 @@ In the desktop app, add a player, choose **Custom Python class…**, and enter
 ```python
 import pokerarena as pa
 
-B = "python:pokerarena.baselines."
+B = "python:bots.NLH."
 
 if __name__ == "__main__":
     res = pa.run({
@@ -525,17 +547,18 @@ if __name__ == "__main__":
         "format": {"variant": "nlhe", "max_seats": 6},
         "table": {"hands_per_table": 2000, "blinds": {"sb": 1, "bb": 2}, "record_timing": True},
         "bots": [
-            {"name": "mine", "kind": "python:mybots.MyBot"},
-            {"name": "tag", "kind": B + "TightAggressive", "anchor": 1300},
-            {"name": "random", "kind": B + "RandomLegal", "anchor": 850},
-            {"name": "station", "kind": B + "CallingStation", "anchor": 400},
+            {"name": "mine", "kind": B + "my_bot.MyBot"},
+            {"name": "tag", "kind": B + "tag.TightAggressive", "anchor": 1300},
+            {"name": "random", "kind": B + "random_legal.RandomLegal", "anchor": 850},
+            {"name": "station", "kind": B + "calling_station.CallingStation", "anchor": 400},
         ],
     }, save=False)
     print(res.table)
     print("hand replays:", res.replays_dir)
 ```
 
-Or use the desktop app: load the baselines preset, add your bot, and press Run.
+Or use the desktop app: the default lineup is the three anchored bots, so click
+**Add bot**, pick yours, and press Run.
 
 **Look at how it played.** `replay_hands_per_bot` (the app's **Save 100 random hands per
 bot**) writes `hand_replays/<run_id>/mine.txt`: 100 random hands your bot played, as
@@ -562,6 +585,8 @@ same config twice; results must be identical.
       used.
 - [ ] Blinds are read per hand (`obs.bb`), empty seats (status 0) are skipped, and stacks
       are read in bb.
+- [ ] The bot is a file in `bots/NLH/` with its parameters as class constants, a docstring,
+      and a `NAME`. No `ANCHOR`, unless it is meant as a fixed reference.
 - [ ] Constructor is cheap and free of side effects. Shared data is loaded once per
       process.
 - [ ] Only the hooks you need are overridden, and the module is importable from the run's

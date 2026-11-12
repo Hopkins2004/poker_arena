@@ -1,6 +1,7 @@
-# 6-max No-Limit Hold'em cash game: the three anchored baselines plus four variants.
+# 6-max No-Limit Hold'em cash game with the three anchored baselines (bots/NLH).
 # Anchored bots keep a fixed Elo (random 850, station 400, tag 1300) that pins the scale.
-# 7 bots at 6 seats -> T = max(7, ceil(4*7/6)) = 7 tables per round, 6 appearances each.
+# 3 bots at 6 seats: each table seats every bot twice (pooled for rating);
+# T = max(3, ceil(4*3/6)) = 3 tables per round.
 
 [run]
 rounds = 5
@@ -37,37 +38,15 @@ margin_c = 30
 
 [[bots]]
 name = "random"
-kind = "python:pokerarena.baselines.RandomLegal"
-params = { fold = 1.0, call = 2.0, raise = 1.0, raise_sizes = [0.5, 1.0] }
+kind = "python:bots.NLH.random_legal.RandomLegal"
 anchor = 850
 
 [[bots]]
 name = "station"
-kind = "python:pokerarena.baselines.CallingStation"
+kind = "python:bots.NLH.calling_station.CallingStation"
 anchor = 400
 
 [[bots]]
 name = "tag"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 300 }
+kind = "python:bots.NLH.tag.TightAggressive"
 anchor = 1300
-
-[[bots]]
-name = "tag_tight"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 300, tightness = 2.0 }
-
-[[bots]]
-name = "tag_loose"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 200, tightness = -3.0, call_margin = 0.0 }
-
-[[bots]]
-name = "random_aggro"
-kind = "python:pokerarena.baselines.RandomLegal"
-params = { fold = 1.0, call = 1.0, raise = 2.0, raise_sizes = [0.75, 1.5, 3.0] }
-
-[[bots]]
-name = "random_passive"
-kind = "python:pokerarena.baselines.RandomLegal"
-params = { fold = 2.0, call = 3.0, raise = 0.2, raise_sizes = [0.5] }

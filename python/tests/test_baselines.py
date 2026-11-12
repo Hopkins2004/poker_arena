@@ -1,12 +1,29 @@
-from pathlib import Path
+"""The anchored bots in bots/NLH and the catalog that discovers them."""
+
+import pytest
 
 import pokerarena as pa
-from pokerarena.baselines import RandomLegal, chen_score
+from bots.NLH.random_legal import RandomLegal
+from bots.NLH.tag import chen_score
 
-CONFIG = (Path(__file__).parent.parent.parent / "configs" / "trio.toml").read_text()
+
+def test_catalog_finds_the_anchored_bots():
+    bots = {b.name: b for b in pa.discover()}
+    assert set(bots) == {"random", "station", "tag"}
+    assert (bots["random"].anchor, bots["station"].anchor, bots["tag"].anchor) == (850, 400, 1300)
+    assert bots["tag"].kind == "python:bots.NLH.tag.TightAggressive"
+    assert all(b.label and b.path.endswith(".py") for b in bots.values())
+    assert pa.catalog.anchored_lineup() == [
+        {"name": b.name, "kind": b.kind, "anchor": b.anchor} for b in pa.discover()]
 
 
-def test_chen_matches_rust():
+def test_parameters_are_hardcoded():
+    with pytest.raises(TypeError):
+        RandomLegal(seed=1, fold=2.0)
+    assert RandomLegal.RAISE_SIZES == (0.5, 1.0)
+
+
+def test_chen_score():
     c = lambda s: pa.parse_cards(s)[0]
     assert chen_score(c("As"), c("Ah")) == 20.0
     assert chen_score(c("Ks"), c("Kh")) == 16.0
@@ -16,15 +33,15 @@ def test_chen_matches_rust():
     assert chen_score(c("Ts"), c("9s")) == 8.0
 
 
-def test_ports_play_legally_and_match_style():
-    cfg = CONFIG.replace("hands_per_table = 1000", "hands_per_table = 300")
-    res = pa.run(cfg, save=False, quiet=True, rounds=1, processes=2)
+def test_anchored_lineup_plays_legally():
+    cfg = {
+        "run": {"rounds": 1, "seed": 3},
+        "format": {"variant": "nlhe", "max_seats": 6},
+        "table": {"hands_per_table": 300, "blinds": {"sb": 1, "bb": 2}},
+        "bots": pa.catalog.anchored_lineup(),
+    }
+    res = pa.run(cfg, save=False, quiet=True, processes=2)
     rows = {r["key"]: r for r in res.rows}
-    assert all(r["illegal"] == 0 for r in rows.values())
-    assert rows["station"]["pfr"] == 0.0 and rows["station"]["vpip"] > 0.85
-    assert rows["tag_loose"]["rating"] > rows["station"]["rating"]
-
-
-def test_random_legal_accepts_rust_param_names():
-    b = RandomLegal(seed=1, **{"fold": 2.0, "call": 3.0, "raise": 0.2, "raise_sizes": [0.5]})
-    assert b.raise_w == 0.2
+    assert all(r["illegal"] == 0 and r["anchored"] for r in rows.values())
+    assert res.ratings == {"random": 850, "station": 400, "tag": 1300}
+    assert rows["tag"]["bb_per_100"] > rows["station"]["bb_per_100"]

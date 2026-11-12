@@ -7,9 +7,9 @@
 use arena::bot::{Action, Bot, BotFactory, Observation};
 use arena::runner::{build_pool, run_tables};
 use arena::{LeaderboardFile, RunSpec, Schedule, TableConfig};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use engine::rng::{below, unit_f64};
-use engine::{Card, Deck, Evaluator, GameFormat};
+use engine::{Card, Deck, Evaluator};
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
@@ -35,9 +35,9 @@ enum Cmd {
         /// Hands per table.
         #[arg(long, default_value_t = 10_000)]
         hands: u64,
-        /// Game variant.
-        #[arg(long, value_enum, default_value_t = BenchVariant::Nlhe)]
-        variant: BenchVariant,
+        /// Format name from the engine's rules registry (nlhe, plo, flhe, ...).
+        #[arg(long, default_value = "nlhe")]
+        variant: String,
         /// Enable hand-history writing (to measure its cost).
         #[arg(long)]
         hand_history: bool,
@@ -51,12 +51,6 @@ enum Cmd {
         #[arg(long, default_value = "leaderboard.json")]
         file: PathBuf,
     },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum BenchVariant {
-    Nlhe,
-    Plo,
 }
 
 fn main() -> ExitCode {
@@ -93,7 +87,7 @@ fn cmd_leaderboard(file: &std::path::Path) -> Result<(), String> {
 fn cmd_bench(
     tables: usize,
     hands: u64,
-    variant: BenchVariant,
+    variant: String,
     hand_history: bool,
     threads: Option<usize>,
 ) -> Result<(), String> {
@@ -149,10 +143,12 @@ fn cmd_bench(
     );
 
     // --- Full hands ------------------------------------------------------------------
-    let (format, label) = match variant {
-        BenchVariant::Nlhe => (GameFormat::nlhe(6), "6-max NLHE"),
-        BenchVariant::Plo => (GameFormat::plo(6), "6-max PLO"),
-    };
+    let rules = engine::rules::by_name(&variant).ok_or_else(|| {
+        let known: Vec<&str> = engine::rules::ALL.iter().map(|r| r.name()).collect();
+        format!("unknown variant `{variant}` (known: {})", known.join(", "))
+    })?;
+    let format = rules.default_format(6);
+    let label = format!("6-max {}", rules.title());
     let mut table = TableConfig::cash(hands, 1, 2, 100);
     table.hand_history = hand_history;
     let spec = RunSpec {

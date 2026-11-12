@@ -5,7 +5,7 @@ import pytest
 
 import pokerarena as pa
 
-PY = "python:pokerarena.baselines."
+PY = "python:bots.NLH."
 
 MIXED = """
 [run]
@@ -23,18 +23,17 @@ blinds = { sb = 1, bb = 2 }
 
 [[bots]]
 name = "tag"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 50 }
+kind = "python:bots.NLH.tag.TightAggressive"
 anchor = 1300
 
 [[bots]]
 name = "base_random"
-kind = "python:pokerarena.baselines.RandomLegal"
+kind = "python:bots.NLH.random_legal.RandomLegal"
 anchor = 850
 
 [[bots]]
 name = "station"
-kind = "python:pokerarena.baselines.CallingStation"
+kind = "python:bots.NLH.calling_station.CallingStation"
 anchor = 400
 
 [[bots]]
@@ -87,7 +86,7 @@ def test_all_tables_are_python_tables():
 
 def test_rust_bot_kinds_are_rejected():
     with pytest.raises(ValueError, match="not a Python bot"):
-        pa.Run(MIXED.replace(f'kind = "{PY}CallingStation"', 'kind = "calling_station"'),
+        pa.Run(MIXED.replace(f'kind = "{PY}calling_station.CallingStation"', 'kind = "calling_station"'),
                load_leaderboard=False)
 
 

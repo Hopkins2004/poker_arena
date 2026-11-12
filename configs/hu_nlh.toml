@@ -24,17 +24,15 @@ margin_c = 30
 
 [[bots]]
 name = "random"
-kind = "python:pokerarena.baselines.RandomLegal"
-params = { fold = 1.0, call = 2.0, raise = 1.0, raise_sizes = [0.5, 1.0] }
+kind = "python:bots.NLH.random_legal.RandomLegal"
 anchor = 850
 
 [[bots]]
 name = "station"
-kind = "python:pokerarena.baselines.CallingStation"
+kind = "python:bots.NLH.calling_station.CallingStation"
 anchor = 400
 
 [[bots]]
 name = "tag"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 300 }
+kind = "python:bots.NLH.tag.TightAggressive"
 anchor = 1300

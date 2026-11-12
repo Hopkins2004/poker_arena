@@ -6,7 +6,7 @@ High-throughput engine for running poker bots against each other (6-max NLH firs
 
 - **Rust (stable, edition 2021)** for everything performance-critical: cards, hand evaluation, game state machine, table runner, matchmaking, ratings.
 - **rayon** for CPU parallelism (one table = one task; tables never share mutable state).
-- **PyO3 + maturin** for Python bindings. **All bots are Python** (NumPy/PyTorch friendly); the Rust engine deals, enforces rules, runs tables in worker processes and rates results. Baselines live in `pokerarena.baselines` (random 850, calling station 400, tight-aggressive 1300, as anchored Elo).
+- **PyO3 + maturin** for Python bindings. **All bots are Python** (NumPy/PyTorch friendly); the Rust engine deals, enforces rules, runs tables in worker processes and rates results. Bots live in `bots/<FORMAT>/` (one file each, parameters hardcoded); the anchored baselines are `bots/NLH/` random (850), calling station (400) and tight-aggressive (1300). The desktop app's Add bot lists that folder.
 - **serde + toml** for config, **serde_json** for results and leaderboards, **clap** for the CLI.
 - Testing: built-in `#[test]`, **proptest** for invariants, **criterion** for benchmarks.
 - RNG: `rand_xoshiro` (Xoshiro256++) or `rand_chacha`, always seeded explicitly. Never use `thread_rng()` in engine code.
@@ -15,10 +15,11 @@ High-throughput engine for running poker bots against each other (6-max NLH firs
 
 ```
 crates/
-  engine/    # cards, deck, hand evaluator, equity, game rules, state machine. No I/O, no threads.
+  engine/    # cards, deck, hand evaluator, equity, state machine; rules/ = one file per format and per betting structure. No I/O, no threads.
   arena/     # bot trait, table runner, matchmaking, ratings (with anchors), stats, replays, config, parallel scheduler
   cli/       # `arena` binary: bench, leaderboard
 python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` (baselines, runner, desktop GUI) + example bots
+bots/NLH/    # bots, one file each (anchored baselines)
 configs/     # example TOML configs
 ```
 
@@ -97,6 +98,7 @@ Always benchmark in `--release`. Set `RUSTFLAGS="-C target-cpu=native"` for loca
 - Write tests alongside each feature. Rules features need at least one scripted-hand test, i.e. a fixed deck plus a fixed action list with asserted final stacks.
 - Before claiming a performance improvement, run `cargo bench` before and after and report the numbers.
 - Keep `engine` free of matchmaking and rating concepts. Keep `arena` free of rules logic.
+- Format-specific logic belongs in `engine/src/rules/` (a `formats/<name>.rs` per format, a `betting/<name>.rs` per betting structure); the state machine and everything above it look formats up through the registry. Never match on `Variant` outside `rules/`.
 - When changing the `Bot` trait or `Observation`, update the Python bindings, the Python protocol class and the example bots in the same change.
 - Public types get doc comments. Non-obvious rules code gets a comment citing the rule it implements.
 - Don't add dependencies beyond those listed without stating why in the PR/commit message.

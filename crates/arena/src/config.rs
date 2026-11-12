@@ -7,7 +7,7 @@
 //! # threads = 8                    # default: all cores
 //!
 //! [format]
-//! variant = "nlhe"                  # nlhe | plo | flhe
+//! variant = "nlhe"                  # a registered format: nlhe | plo | flhe
 //! max_seats = 6
 //! # small_bet = 2, big_bet = 4, cap = 4   (flhe only)
 //!
@@ -43,7 +43,7 @@ use crate::matchmaking::MatchmakingConfig;
 use crate::rating::RatingConfig;
 use crate::runner::RunSpec;
 use crate::table::{BlindLevel, Blinds, IllegalActionPolicy, StackPolicy, TableConfig, TableMode};
-use engine::{Betting, GameFormat, Variant};
+use engine::{Betting, GameFormat};
 use serde::{Deserialize, Serialize};
 
 /// Run-level settings.
@@ -80,24 +80,12 @@ impl Default for RunSection {
     }
 }
 
-/// Variant names in config files.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VariantName {
-    /// No-limit Hold'em.
-    Nlhe,
-    /// Pot-limit Omaha.
-    Plo,
-    /// Fixed-limit Hold'em.
-    Flhe,
-}
-
 /// Game format section.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FormatSection {
-    /// Variant.
-    pub variant: VariantName,
+    /// Format name as registered in `engine::rules` (`"nlhe"`, `"plo"`, `"flhe"`, ...).
+    pub variant: String,
     /// Seats per table (format maximum).
     #[serde(default = "default_seats")]
     pub max_seats: u8,
@@ -227,40 +215,41 @@ impl ConfigFile {
         Self::parse(&text)
     }
 
-    /// Builds the game format.
+    /// Builds the game format: the registered format's defaults (see `engine::rules`), with
+    /// the optional overrides applied and validated by that format's rules.
     pub fn game_format(&self) -> Result<GameFormat, String> {
         let f = &self.format;
-        let bb = self.table_config()?.reference_bb();
-        let fmt = match f.variant {
-            VariantName::Nlhe => GameFormat::nlhe(f.max_seats),
-            VariantName::Plo => {
-                let mut g = GameFormat::plo(f.max_seats);
-                if let Some(h) = f.hole_cards {
-                    g.hole_cards = h;
-                }
-                g
-            }
-            VariantName::Flhe => {
-                let small = f.small_bet.unwrap_or(bb);
-                let mut g = GameFormat::flhe(f.max_seats, small, f.big_bet.unwrap_or(2 * small));
-                if let (Some(c), Betting::FixedLimit { cap, .. }) = (f.cap, &mut g.betting) {
+        let rules = engine::rules::by_name(&f.variant).ok_or_else(|| {
+            let known: Vec<&str> = engine::rules::ALL.iter().map(|r| r.name()).collect();
+            format!(
+                "unknown variant `{}` (known: {})",
+                f.variant,
+                known.join(", ")
+            )
+        })?;
+        let mut fmt = rules.default_format(f.max_seats);
+        if let Some(h) = f.hole_cards {
+            fmt.hole_cards = h;
+        }
+        match &mut fmt.betting {
+            Betting::FixedLimit {
+                small_bet,
+                big_bet,
+                cap,
+            } => {
+                // Fixed-limit sizes default to the big blind and twice that.
+                let bb = self.table_config()?.reference_bb();
+                *small_bet = f.small_bet.unwrap_or(bb);
+                *big_bet = f.big_bet.unwrap_or(2 * *small_bet);
+                if let Some(c) = f.cap {
                     *cap = c;
                 }
-                g
             }
-        };
-        if f.variant != VariantName::Flhe
-            && (f.small_bet.is_some() || f.big_bet.is_some() || f.cap.is_some())
-        {
-            return Err("small_bet/big_bet/cap only apply to flhe".into());
+            _ if f.small_bet.is_some() || f.big_bet.is_some() || f.cap.is_some() => {
+                return Err("small_bet/big_bet/cap only apply to fixed-limit formats".into());
+            }
+            _ => {}
         }
-        if f.variant != VariantName::Plo && f.hole_cards.is_some_and(|h| h != 2) {
-            return Err("Hold'em uses 2 hole cards".into());
-        }
-        debug_assert!(matches!(
-            fmt.variant,
-            Variant::NLHE | Variant::PLO | Variant::FLHE
-        ));
         fmt.validate().map_err(|e| e.to_string())?;
         Ok(fmt)
     }

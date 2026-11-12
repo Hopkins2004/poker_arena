@@ -11,7 +11,7 @@ import pytest
 
 import pokerarena as pa
 
-PY = "python:pokerarena.baselines."
+PY = "python:bots.NLH."
 
 BASE = """
 [run]
@@ -27,26 +27,25 @@ blinds = {{ sb = 1, bb = 2 }}
 BASE_BOTS = """
 [[bots]]
 name = "tag"
-kind = "python:pokerarena.baselines.TightAggressive"
-params = { samples = 50 }
+kind = "python:bots.NLH.tag.TightAggressive"
 anchor = 1300
 [[bots]]
 name = "random"
-kind = "python:pokerarena.baselines.RandomLegal"
+kind = "python:bots.NLH.random_legal.RandomLegal"
 anchor = 850
 [[bots]]
 name = "station"
-kind = "python:pokerarena.baselines.CallingStation"
+kind = "python:bots.NLH.calling_station.CallingStation"
 anchor = 400
 """
 PY_BOTS = """
 [[bots]]
-name = "py_tag"
-kind = "python:pokerarena.baselines.TightAggressive"
+name = "py_equity"
+kind = "python:examples.equity_bot.EquityBot"
 params = { samples = 50 }
 [[bots]]
-name = "py_station"
-kind = "python:pokerarena.baselines.CallingStation"
+name = "py_random"
+kind = "python:examples.random_bot.RandomBot"
 """
 
 
@@ -265,4 +264,4 @@ def test_saved_ratings_are_reused_except_anchors(tmp_path):
     assert (job2.initial_ratings["tag"], job2.initial_ratings["random"],
             job2.initial_ratings["station"]) == (1300, 850, 400)
     fresh = pa.ArenaJob(cfg(200), save=False, processes=2)
-    assert fresh.initial_ratings["py_tag"] == 1500
+    assert fresh.initial_ratings["py_equity"] == 1500

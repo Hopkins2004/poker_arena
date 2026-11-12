@@ -1,19 +1,31 @@
 //! Monte Carlo equity against random opponent hands.
 
 use crate::card::{Card, CardMask};
-use crate::eval::{Evaluator, HandAcc};
+use crate::eval::{Evaluator, HandEvaluator};
 use crate::format::Variant;
 use crate::rng::below;
 use rand_core::Rng;
 
 /// Estimates the equity (win probability, ties split) of `hole` with the visible `board`
-/// against `n_opponents` random hands, from `samples` random runouts. Uses the Omaha rule
-/// (exactly two hole cards) for [`Variant::PLO`]. Allocation-free.
+/// against `n_opponents` random hands, from `samples` random runouts, using the showdown
+/// rules of `variant` (e.g. exactly two hole cards in PLO). Allocation-free.
 ///
 /// Opponent hands are dealt `hole.len()` cards each, uniformly from the unseen cards.
-pub fn equity<R: Rng + ?Sized>(
+pub fn equity<R: Rng>(
     ev: Evaluator,
     variant: Variant,
+    hole: &[Card],
+    board: &[Card],
+    n_opponents: usize,
+    samples: u32,
+    rng: &mut R,
+) -> f64 {
+    crate::rules::rules(variant).equity(ev, hole, board, n_opponents, samples, rng)
+}
+
+/// [`equity`] for a statically known showdown evaluator `E` (what each format's rules call).
+pub fn equity_with<E: HandEvaluator, R: Rng + ?Sized>(
+    ev: Evaluator,
     hole: &[Card],
     board: &[Card],
     n_opponents: usize,
@@ -41,8 +53,6 @@ pub fn equity<R: Rng + ?Sized>(
         "not enough cards for {n_opponents} opponents"
     );
 
-    let omaha = variant == Variant::PLO;
-    let board_acc = HandAcc::from_cards(board);
     let mut full_board = [Card(0); 5];
     full_board[..board.len()].copy_from_slice(board);
     let mut total = 0.0f64;
@@ -52,23 +62,13 @@ pub fn equity<R: Rng + ?Sized>(
             let j = i + below(rng, (n_live - i) as u32) as usize;
             live.swap(i, j);
         }
-        let runout = &live[..need_board];
-        let strength = |h: &[Card]| {
-            if omaha {
-                let mut fb = full_board;
-                fb[board.len()..].copy_from_slice(runout);
-                ev.eval_omaha(h, &fb)
-            } else {
-                let b = HandAcc::from_cards(runout).combine(board_acc);
-                ev.eval_acc(HandAcc::from_cards(h).combine(b))
-            }
-        };
-        let mine = strength(hole);
+        full_board[board.len()..].copy_from_slice(&live[..need_board]);
+        let mine = E::strength(ev, hole, &full_board);
         let mut best_opp = 0;
         let mut ties = 0u32;
         for o in 0..n_opponents {
             let start = need_board + o * hc;
-            let s = strength(&live[start..start + hc]);
+            let s = E::strength(ev, &live[start..start + hc], &full_board);
             if s > best_opp {
                 best_opp = s;
                 ties = (s == mine) as u32;
