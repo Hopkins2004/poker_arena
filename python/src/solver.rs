@@ -324,6 +324,71 @@ pub fn solver_river_equity<'py>(
     Ok((PyArray1::from_vec(py, eq), PyArray1::from_vec(py, mass)))
 }
 
+/// Flop all-in showdown matrix: flat `[1326 * 1326]` `W` with `W[h, h'] = Σ sign(str(h) −
+/// str(h'))` over the unordered turn + river runouts both hands survive (0 unless disjoint
+/// and valid). `W @ q` is the showdown net of every combo against opponent reach `q`
+/// summed over runouts; each deal sees `C(45, 2) = 990` runouts.
+#[pyfunction]
+pub fn solver_flop_showdown_matrix<'py>(
+    py: Python<'py>,
+    board: Vec<u8>,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    if board.len() != 3 {
+        return Err(verr("a flop board has 3 cards"));
+    }
+    let mut seen = 0u64;
+    for &c in &board {
+        if c >= 52 || seen & (1 << c) != 0 {
+            return Err(verr("board cards must be distinct cards 0..52"));
+        }
+        seen |= 1 << c;
+    }
+    let out = py.detach(|| {
+        let cc = solver::combo_cards();
+        let mask: Vec<u64> = cc.iter().map(|[a, b]| (1u64 << a) | (1u64 << b)).collect();
+        let rest: Vec<u8> = (0..52u8).filter(|&c| seen & (1 << c) == 0).collect();
+        // |W| <= 990 runouts, so i16 accumulators suffice (half the memory traffic).
+        let mut w = vec![0i16; N_COMBOS * N_COMBOS];
+        let (mut idx, mut st, mut mk) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, &t) in rest.iter().enumerate() {
+            for &r in &rest[i + 1..] {
+                let b = [board[0], board[1], board[2], t, r].map(engine::Card);
+                let rh = solver::RiverHands::new(&b);
+                idx.clear();
+                st.clear();
+                mk.clear();
+                for (h, &s) in rh.strength_1326.iter().enumerate() {
+                    if s > 0 {
+                        idx.push(h);
+                        st.push(s as i32);
+                        mk.push(mask[h]);
+                    }
+                }
+                // Upper triangle only (row h < column g in combo order): sequential writes.
+                for a in 0..idx.len() {
+                    let (sa, ma) = (st[a], mk[a]);
+                    let row = &mut w[idx[a] * N_COMBOS..(idx[a] + 1) * N_COMBOS];
+                    for ((&g, &sg), &mg) in idx[a + 1..].iter().zip(&st[a + 1..]).zip(&mk[a + 1..])
+                    {
+                        let d = ((sa > sg) as i16 - (sa < sg) as i16) & -((ma & mg == 0) as i16);
+                        row[g] += d;
+                    }
+                }
+            }
+        }
+        let mut out = vec![0f32; N_COMBOS * N_COMBOS];
+        for h in 0..N_COMBOS {
+            for g in h + 1..N_COMBOS {
+                let x = w[h * N_COMBOS + g] as f32;
+                out[h * N_COMBOS + g] = x;
+                out[g * N_COMBOS + h] = -x;
+            }
+        }
+        out
+    });
+    Ok(PyArray1::from_vec(py, out))
+}
+
 /// The 48 river boards of a turn board, with cached hand sets: per-card opponent masses and
 /// showdown sums for turn solving (`river_net.turn`). Vectors are 1326-combo f32 arrays.
 #[pyclass(module = "pokerarena._native", name = "TurnBoards")]
@@ -407,6 +472,50 @@ impl TurnBoards {
             out
         });
         Ok(PyArray1::from_vec(py, out))
+    }
+
+    /// Turn-bucket features of every combo: `(EHS, E[HS²])` with `HS_c(h)` the river equity
+    /// against a uniform random hand on `board + c`, averaged over the river cards `h`
+    /// doesn't hold (0 for blocked combos). Same numbers as the Python reference
+    /// `river_net.preriver.turn_features`.
+    fn hs_features<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>) {
+        let (e1, e2) = py.detach(|| {
+            let (mut s1, mut s2, mut n) = (
+                vec![0f64; N_COMBOS],
+                vec![0f64; N_COMBOS],
+                vec![0u32; N_COMBOS],
+            );
+            for rh in &self.rivers {
+                let m = rh.set.len();
+                let u = 1.0f32 / m as f32;
+                let q = vec![u; m];
+                let (mut net, mut mass) = (vec![0f32; m], vec![0f32; m]);
+                solver::terminal::showdown_net(&rh.set, &q, &mut net);
+                solver::terminal::compat_mass(&rh.set, &q, &mut mass);
+                for (i, &c) in rh.combo.iter().enumerate() {
+                    let eq = if mass[i] > 0.0 {
+                        0.5 * (mass[i] + net[i]) / mass[i]
+                    } else {
+                        0.0
+                    };
+                    let e = eq as f64;
+                    s1[c as usize] += e;
+                    s2[c as usize] += e * e;
+                    n[c as usize] += 1;
+                }
+            }
+            let f = |s: &[f64]| -> Vec<f64> {
+                s.iter()
+                    .zip(&n)
+                    .map(|(&x, &k)| if k > 0 { x / k as f64 } else { 0.0 })
+                    .collect()
+            };
+            (f(&s1), f(&s2))
+        });
+        (PyArray1::from_vec(py, e1), PyArray1::from_vec(py, e2))
     }
 
     /// The linear map behind [`showdown_net_sum`](Self::showdown_net_sum): flat
@@ -607,6 +716,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_abstract_solve, m)?)?;
     m.add_function(wrap_pyfunction!(solver_range_equity, m)?)?;
     m.add_function(wrap_pyfunction!(solver_river_equity, m)?)?;
+    m.add_function(wrap_pyfunction!(solver_flop_showdown_matrix, m)?)?;
     m.add_class::<TurnBoards>()?;
     m.add_class::<LeafIndex>()?;
     Ok(())

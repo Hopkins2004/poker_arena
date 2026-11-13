@@ -80,7 +80,7 @@ def bucketed(data_dir, K: int, workers: int | None = None, scheme: str | None = 
     d = Path(data_dir)
     man = manifest(d)
     n = man.get("n", 0)
-    if man["config"].get("kind") == "preriver":
+    if man["config"].get("kind") in ("preriver", "turn"):
         from .preriver import DEFAULT_SCHEME
 
         scheme = scheme or DEFAULT_SCHEME

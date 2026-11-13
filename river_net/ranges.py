@@ -214,7 +214,7 @@ class GeneratorConfig:
 
 
 # street -> (board cards, street lines played, extra seed word)
-STREETS = {"river": (5, 2, None), "turn": (4, 1, 4), "turn_end": (4, 2, 44)}
+STREETS = {"river": (5, 2, None), "turn": (4, 1, 4), "turn_end": (4, 2, 44), "flop": (3, 0, 3)}
 
 
 class RangeGenerator:
@@ -248,7 +248,9 @@ class RangeGenerator:
           flop line played (turn-solver spots; source B splits mass over turn equity vs a
           uniform range instead of river strength);
         * ``street="turn_end"``: 4-card board, flop and turn lines played, i.e. a river spot
-          before the river card (pre-river network data, :mod:`river_net.preriver`).
+          before the river card (pre-river network data, :mod:`river_net.preriver`);
+        * ``street="flop"``: 3-card board straight from the preflop scenario, no postflop
+          line (flop-solver spots; source B orders hands by Monte Carlo flop equity).
         """
         if street not in STREETS:
             raise ValueError(f"street must be one of {STREETS}, got {street!r}")
@@ -367,9 +369,10 @@ class RangeGenerator:
         board = rng.choice(52, size=5, replace=False).astype(np.uint8)[: self._nb]
         if self._nb == 5:
             strength = _native.solver_river_strengths(board.tolist()).astype(np.int64)
-        else:  # turn: order by equity against a uniform range (exact over rivers)
+        else:  # turn (exact over rivers) / flop (Monte Carlo): equity vs a uniform range
             uni = (~np.isin(HAND_CARDS, board).any(axis=1)).astype(np.float32)
-            eq = _native.solver_range_equity(board.tolist(), uni / uni.sum(), 1, 0)
+            samples = 1 if self._nb == 4 else self.config.flop_samples
+            eq = _native.solver_range_equity(board.tolist(), uni / uni.sum(), samples, 0)
             strength = np.where(uni > 0, 1 + np.round(eq * 1e6), 0).astype(np.int64)
         valid = np.flatnonzero(strength > 0)
         r = [recursive_split(strength, valid, rng) for _ in range(2)]

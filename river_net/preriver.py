@@ -47,7 +47,14 @@ DEFAULT_SCHEME = "ehs2:8"
 
 def turn_features(board) -> tuple:
     """``(EHS, E[HS²])`` of every combo on a turn board (0 for blocked combos), with
-    ``HS_c`` the river equity against a uniform random hand on ``board + c``."""
+    ``HS_c`` the river equity against a uniform random hand on ``board + c`` (native,
+    ``TurnBoards.hs_features``; bit-identical to :func:`turn_features_reference`)."""
+    e1, e2 = _native.TurnBoards(parse_board(board).tolist()).hs_features()
+    return np.asarray(e1), np.asarray(e2)
+
+
+def turn_features_reference(board) -> tuple:
+    """Pure-Python reference of :func:`turn_features` (one river-equity call per card)."""
     b = parse_board(board)
     valid = ~np.isin(HAND_CARDS, b).any(axis=1)
     s1 = np.zeros(N_COMBOS)
@@ -132,6 +139,7 @@ class PreRiverNet:
         self.model = model.eval()
         self.K = model.config["K"]
         self.scheme = scheme
+        self.board_features = False
         if model.config["board_features"]:
             raise NotImplementedError("board-feature pre-river models are not supported")
 

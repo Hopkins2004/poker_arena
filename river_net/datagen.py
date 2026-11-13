@@ -4,6 +4,13 @@ Each sample index ``i`` is generated (``RangeGenerator(seed).generate(i)``) and 
 (``solver.solve``) deterministically, so a dataset is reproducible from (seed, config) and a
 run can be resumed or extended: shards already listed in ``manifest.json`` are skipped.
 
+``--kind turn --teacher river_net/models/river_k64.pt`` writes turn value network data
+(:mod:`river_net.flop`): turn spots (``generate(i, street="turn")``, 4-card boards, the flop
+line played) solved by the turn solver with river-network leaves (``--turn-iters`` DCFR
+iterations, ``--river-samples`` sampled river cards per iteration); ``v1, v2`` are the
+conditional turn values (turn-pot units), ``expl`` the solve's exploitability in its own
+leaf model.
+
 ``--kind preriver --teacher river_net/models/river_k64.pt`` writes pre-river network data
 instead (:mod:`river_net.preriver`): turn-end spots (``generate(i, street="turn_end")``,
 4-card boards) labelled by the river network averaged over all river cards; no solves,
@@ -53,6 +60,13 @@ def _init(seed: int, gen_cfg: dict, solve_cfg: dict) -> None:
         from .preriver import Teacher
 
         _teacher = Teacher(RiverValueNet.load(solve_cfg["teacher"]), threads=1)
+    elif solve_cfg.get("kind") == "turn":
+        import torch
+
+        from .model import RiverValueNet
+
+        torch.set_num_threads(1)
+        _teacher = RiverValueNet.load(solve_cfg["teacher"])
 
 
 class _Labels:
@@ -66,7 +80,15 @@ def _work(indices: list) -> dict:
                                  "expl", "iters", "source", "scenario", "line", "seconds")}
     for i in indices:
         t0 = time.perf_counter()
-        if _teacher is not None:
+        if _solve_cfg.get("kind") == "turn":
+            from .turn import NetworkLeaf, TurnSolver
+
+            spot = _gen.generate(i, street="turn")
+            ts = TurnSolver(spot, NetworkLeaf(_teacher), river_samples=_solve_cfg["river_samples"],
+                            seed=int(i))
+            res = ts.solve(iters=_solve_cfg["iters"], target_expl=0.0,
+                           check_every=_solve_cfg["iters"])
+        elif _teacher is not None:
             spot = _gen.generate(i, street="turn_end")
             res = _Labels(*_teacher(spot.board, spot.spr, spot.r1, spot.r2))
         else:
@@ -120,6 +142,22 @@ def _write_atomic(path: Path, text: str) -> None:
 
 
 def _config(a) -> dict:
+    if a.kind == "turn":
+        return {
+            "format": FORMAT,
+            "kind": "turn",
+            "seed": a.seed,
+            "shard_size": a.shard_size,
+            "generator": asdict(GeneratorConfig()),
+            "street": "turn",
+            "solver": {"kind": "turn", "teacher": str(a.teacher), "iters": a.turn_iters,
+                       "river_samples": a.river_samples, "abstraction": DEFAULT_ABSTRACTION,
+                       "algorithm": "DCFR(1.5, 0, 2), simultaneous updates, river-network "
+                                    "leaves on sampled river cards (river_net/turn.py)"},
+            "value_convention": "turn-pot units; u1 = (collected - put in on the turn and "
+                                "river)/P - 1/2; v = conditional per-hand value under the "
+                                "average strategy; m = turn-board compatible mass",
+        }
     if a.kind == "preriver":
         return {
             "format": FORMAT,
@@ -183,9 +221,12 @@ def main(argv=None) -> int:
     ap.add_argument("--target-expl", type=float, default=0.002)
     ap.add_argument("--check-every", type=int, default=50)
     ap.add_argument("--log-every", type=float, default=30.0, help="seconds")
-    ap.add_argument("--kind", choices=("river", "preriver"), default="river")
+    ap.add_argument("--kind", choices=("river", "preriver", "turn"), default="river")
+    ap.add_argument("--turn-iters", type=int, default=150, help="--kind turn: DCFR iterations")
+    ap.add_argument("--river-samples", type=int, default=8,
+                    help="--kind turn: river cards sampled per iteration")
     ap.add_argument("--teacher", type=Path, default=Path("river_net/models/river_k64.pt"),
-                    help="river network labelling --kind preriver data")
+                    help="river network labelling --kind preriver / turn data")
     a = ap.parse_args(argv)
 
     a.out.mkdir(parents=True, exist_ok=True)

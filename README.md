@@ -273,6 +273,10 @@ sampling (`TurnSolver(..., river_samples=8)`) bring a turn solve from about 2.3 
 - **Pre-river network:** an optional chance-averaged network (`river_net/preriver.py`,
   data via `python -m river_net.datagen --kind preriver`) gives one query per leaf.
 
+**Flop solver** (`river_net/flop.py`). It works the same way one street earlier: flop leaves are valued by a turn value network (`river_net/models/turn_k256.pt`, trained on turn solves) on 8 sampled turn cards, and flop all-ins are exact over all runouts.
+- **Bot:** `bots/NLH/full_solver.py` chains flop, turn and river solves through Bayesian range updates.
+- **Quality check:** `python -m river_net.flop_check` scores flop strategies against turn-solver continuation.
+
 Full reference (data types, pipelines, networks, benchmark, bots):
 [`bots/NLH/SOLVERS.md`](bots/NLH/SOLVERS.md).
 

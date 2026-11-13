@@ -1,6 +1,6 @@
-# River and turn solvers: technical reference
+# Postflop solvers (river, turn, flop): technical reference
 
-This is the reference for the solver stack behind the `range_solver`, `range_solver_turn` and `range_tag_turn_fast` bots. It covers:
+This is the reference for the solver stack behind the `range_solver`, `range_solver_turn`, `range_tag_turn_fast` and `full_solver` bots. It covers:
 
 - the conventions and data types;
 - the exact river solver;
@@ -8,6 +8,8 @@ This is the reference for the solver stack behind the `range_solver`, `range_sol
 - the river value network;
 - the depth-limited turn solver, with its leaf evaluators and speed options;
 - the pre-river (chance-averaged) network;
+- the turn value network;
+- the depth-limited flop solver;
 - the bots that use all of the above.
 
 All paths are relative to the repository root.
@@ -29,8 +31,14 @@ range generator (river_net/ranges.py) ──► river spots ──► exact rive
                                                                ▼
                                                   pre-river network   river_net/models/preriver_k256.pt
 turn spot ──► turn solver (river_net/turn.py): DCFR on the turn tree, leaves valued by either network
+                 │ v1, v2 per hand (river-network leaves, 8 sampled rivers, 150 iterations)
+                 ▼
+         turn data (data/turn_v1, --kind turn) ──► turn value network  river_net/models/turn_k256.pt
+                                                               │ per sampled turn card
+flop spot ──► flop solver (river_net/flop.py): DCFR on the flop tree ◄┘
 bots: range_tag ─► range_solver (exact river) ─► range_solver_turn (turn solve + exact river)
                                                  └► range_tag_turn_fast (sampled, fixed-plan turn solve)
+                                                      └► full_solver (flop solve ─► turn solve ─► river solve)
 ```
 
 ---
@@ -84,6 +92,12 @@ u1 = (collected − put in on the turn and river) / P − ½
 ```
 
 At a river leaf where each player put `c` turn pots in on the turn, the river pot is `1 + 2c` turn pots. River values convert as `u_turn = (1 + 2c) · u_river`, and the river SPR there is `(S − c) / (1 + 2c)`.
+
+### Flop value convention
+
+A flop spot is `(board[3], P, S, r1, r2)` with `P` the flop pot: `u1 = (collected − put in on the flop, turn and river) / P − ½`.
+
+At a turn leaf where each player put `c` flop pots in, the turn pot is `1 + 2c` flop pots: `u_flop = (1 + 2c) · u_turn`, and the turn SPR is `(S − c) / (1 + 2c)`. Every deal `(h, h')` sees 45 turn cards and C(45, 2) = 990 unordered turn + river runouts.
 
 ---
 
@@ -162,6 +176,7 @@ res = solve(spot, iters=500, target_expl=0.002, check_every=50,
 | `"river"` | 5 cards | flop + turn | `[seed, index]` | river solver data, river network |
 | `"turn"` | 4 cards | flop | `[seed, index, 4]` | turn spots (benchmarks, tests) |
 | `"turn_end"` | 4 cards | flop + turn | `[seed, index, 44]` | pre-river network data |
+| `"flop"` | 3 cards | none | `[seed, index, 3]` | flop spots (`flop_check`, tests); source B orders hands by Monte Carlo flop equity (32 runouts) |
 
 ### Preflop scenarios
 
@@ -571,9 +586,139 @@ The next step would be moving the turn CFR loop into Rust, as was done for the r
 
 ---
 
-## 10. Bots
+## 10. Turn value network
 
-All four bots are unanchored, live in `bots/NLH/`, and play preflop from the chart.
+The turn analogue of the river network: per-hand conditional turn values for a turn spot at the start of turn betting, used to value flop leaves. There is no flop network: flops are solved directly (section 11).
+
+### Target
+
+The turn solver's conditional values `v_p(h) = ṽ_p(h) / m_p(h)`, in turn-pot units, under its average strategy:
+- turn convention (section 1), river-network leaves;
+- DCFR, 150 iterations, 8 sampled river cards per iteration (the `range_tag_turn_fast` plan), exact all-ins;
+- defined where `m_p(h) > 0`, 0 elsewhere.
+
+The targets inherit the turn solver's approximations: the river network's error and about 1.4% turn exploitability with exact river play.
+
+### Data
+
+- **Command:** `python -m river_net.datagen --kind turn --teacher river_net/models/river_k64.pt --n <N> --out data/turn_v1`. Options: `--turn-iters 150`, `--river-samples 8`.
+- **Spots:** `generate(i, street="turn")`, a 4-card board with the flop line played.
+- **Labels:** `TurnSolver(spot, NetworkLeaf(river_net), river_samples=8, seed=i).solve(150, check_every=150)`, torch at 1 thread per worker.
+- **Format:** the same shards as the other datasets, with `board uint8[N, 4]`. `spr` is the turn SPR, `m` the turn-board masses, `expl` the solve's exploitability in its own leaf model, `iters` 150.
+- **Throughput:** about 62k samples/hour on 12 cores. Each solve takes 0.66–0.71 s when all 12 workers share the cores and matrix units, against 0.36 s alone.
+- **Shipped data:** `data/turn_v1` stopped at **30,000 samples** (15 shards) for this proof of concept. Own-model exploitability median 0.82%, p95 1.9% of the turn pot.
+
+### Model and training
+
+| Setting | Value |
+|---|---|
+| Class | `TurnValueNet`: the `RiverNet` architecture on turn buckets (`ehs2:8`, K = 256), input 514, 3 × 512 GELU/LayerNorm, output 512 plus zero-sum projection |
+| Loss and optimizer | same as the river network |
+| Command | `python -m river_net.train --data data/turn_v1 --K 256 --scheme ehs2:8 --hidden 512 --epochs 200 --patience 10 --out runs/turn_k256 --save-model river_net/models/turn_k256.pt` |
+| Data | 27,045 training samples |
+| Run | best validation loss 1.310 after 79 epochs, 20 s; last training loss 0.72 |
+| File | `river_net/models/turn_k256.pt` |
+
+The large gap between training and validation loss means it overfits: it is data-limited. Variants all land within 6% of each other:
+
+| Variant | Best validation loss |
+|---|---|
+| 3 × 512, weight decay 1e-4 (shipped) | 1.310 |
+| 3 × 512, weight decay 1e-2 | 1.303 |
+| 3 × 256 | 1.389 |
+| 2 × 1024, weight decay 1e-2 | 1.354 |
+| 4 × 256, weight decay 1e-2 | 1.342 |
+
+More data, such as resuming `datagen` to 100k samples, is the lever.
+
+### Evaluation
+
+`python -m river_net.preriver --model river_net/models/turn_k256.pt --data data/turn_v1 --n 1500`: per-hand error against the turn-solver targets on 1,500 test-board spots, turn-pot units.
+
+| | MAE range-weighted | MAE unweighted |
+|---|---|---|
+| turn network | 0.0602 | 0.0627 |
+| bucketing floor (K = 256) | 0.0122 | 0.0076 |
+| check-down (turn equity − ½) | 0.2059 | 0.2121 |
+
+- **By source** (range-weighted): A 0.057, B 0.073, C 0.053. The root value error is 0.013.
+- **Turn values spread more widely than river values,** because there is more betting left; check-down is 0.21 here against 0.13 on the river. Relative to check-down, the turn network (3.4×) is about as good as the river network (3.7×).
+
+### Interface
+
+```python
+from river_net.flop import TurnValueNet
+tnet = TurnValueNet.load("river_net/models/turn_k256.pt")
+v1, v2 = tnet.predict(board[4], pot, stack, r1, r2)      # conditional turn values, float[1326]
+y = tnet.predict_buckets(x[B, 514], w[B, 512])           # bucket level, as for the river net
+```
+
+`TurnValueNet` is the same wrapper class as `PreRiverNet`: both are `RiverNet` models on turn buckets, with the scheme stored in the checkpoint.
+
+---
+
+## 11. Flop solver (`river_net/flop.py`)
+
+### Game
+
+`FlopSolver(spot, leaf, abstraction=None, turn_samples=None, seed=0, **options)` subclasses `TurnSolver`, with the same DCFR (simultaneous updates), options, resumable `solve`, `set_leaf` and `exploitability`. It changes three things:
+- a 3-card board;
+- `FlopBoards`, holding the 49 turn cards and the flop showdown matrix;
+- all-in normalisation over 990 runouts.
+
+| Terminal | Value for player `p` (counterfactual, flop-pot units) |
+|---|---|
+| Fold by `f` | `u · m_p(h)` with `u = −½ − c_f` (folder) or `½ + c_f` |
+| All-in on the flop | `(½ + S)/990 · (W_flop @ q_opp)(h)`: exact over all turn + river runouts, one product for every all-in node and both players |
+| Turn leaf (betting closed with chips behind) | `(1 + 2c)/45 · Σ_t m_t(h) · v_t(h)`: turn-network values per turn card at the leaf's card-conditioned ranges. `turn_samples = m` evaluates `m` random turn cards per iteration (× 49/m, unbiased) |
+
+### Leaf evaluators
+
+| Class | What it does |
+|---|---|
+| `TurnNetLeaf(TurnValueNet)` | a `NetworkLeaf` on turn buckets. Per flop it builds the 49 turn boards' bucket maps (`turn_bucket_map` with the network's scheme, features from `TurnBoards.hs_features`) and a `LeafIndex`; `deals = 45`. `card_values` returns per-card values for diagnostics |
+| `CheckdownFlopLeaf()` | showdown with no turn or river betting: `(½ + c)/990 · W_flop @ q` (exact, zero-sum baseline) |
+| `FixedTurnLeaf(V)` | fixed per-turn-card conditional values `V[p][L, 49, 1326]`, e.g. turn-solver re-solves |
+
+**Helpers:**
+- `card_masses(q, cards)`: per-card compatible masses `[L, cards, 1326]`.
+- `turn_continuation_values(fs, R1, R2, pool, iters=150, river_samples=8)`: solves every leaf × turn card with the turn solver (river-network leaves) in a process pool.
+
+### Native helpers
+
+| Helper | What it does |
+|---|---|
+| `solver_flop_showdown_matrix(board[3]) -> float32[1326·1326]` | `W[h, h'] = Σ sign(str(h) − str(h'))` over the unordered turn + river runouts both hands survive. 1,176 runouts × all valid pairs, 16-bit accumulators, about 0.37 s per flop (0.48 s with 32-bit). Checked against the sum of the 49 turn boards' `showdown_net_sum` |
+| `TurnBoards(board[4]).hs_features() -> (EHS, E[HS²])` | the turn-bucket features natively, bit-identical to the Python reference `turn_features_reference`. About 3 ms per turn board including construction, against 62 ms in Python |
+
+### Quality check
+
+`python -m river_net.flop_check --spots 10 --configs cd-150 tnet-150 tnet-150-s8 tnet-100-s8` uses flop spots `RangeGenerator(7)`, `street="flop"`, indices 0–9. These are mostly single-raised pots at SPR 16–18, plus one 3-bet pot at SPR 7.
+
+Each flop strategy is scored by:
+1. re-solving every flop leaf × turn card with the **turn solver** (150 iterations, 8 river samples, river-network leaves) at the induced ranges;
+2. holding those values fixed;
+3. computing the flop exploitability **expl@turn** (% of the flop pot).
+
+The re-solves themselves have about 0.6% median own-model exploitability. Results: `results/flop/flop_check.json`.
+
+| Config | Time median | expl@turn median | expl@turn mean | Own median | Leaf wMAE | Leaf MAE |
+|---|---|---|---|---|---|---|
+| cd-150 (check-down leaves) | 0.74 s | 38.20% | 35.51% | 1.00% | — | — |
+| tnet-150 (all 49 turn cards) | 1.69 s | 1.75% | 1.66% | 0.46% | 0.0566 | 0.0580 |
+| **tnet-150-s8 (bot default)** | **1.05 s** | **1.71%** | **1.62%** | 0.62% | 0.0560 | 0.0570 |
+| tnet-100-s8 | 0.93 s | 1.99% | 1.77% | 0.96% | 0.0556 | 0.0566 |
+
+- **Turn-network leaves are 20× better than check-down.** Deep single-raised flops lose 35–50% of the pot when the turn and river are assumed checked down.
+- **Sampling 8 of 49 turn cards is free.** Quality is unchanged and it is 38% faster.
+- **Leaf error at the induced ranges** (0.056) is close to the network's test error (0.060).
+- **Fixed setup dominates.** About 0.37 s for the showdown matrix and about 0.25 s for the 49 turn bucket maps, against about 0.35 s for 150 iterations. Fewer iterations save little.
+
+---
+
+## 12. Bots
+
+All five bots are unanchored, live in `bots/NLH/`, and play preflop from the chart.
 
 ### `range_tag.py`
 
@@ -630,9 +775,25 @@ All four bots are unanchored, live in `bots/NLH/`, and play preflop from the cha
 | `range_solver` | −11.8 ± 19.0 |
 | tag | −3.9 ± 13.9 |
 
+### `full_solver.py`
+
+`range_tag_turn_fast`, plus a heads-up flop solve. Each street's solve hands its Bayesian-updated ranges to the next.
+
+1. **Flop:** both ranges come from the preflop chart line (`_river_ranges(..., streets=())`; uniform if the hand left the chart). The bot solves once per hand at its first flop decision with `FlopSolver(spot, TurnNetLeaf(turn_net), turn_samples=FLOP_TURN_SAMPLES)` for `FLOP_ITERS` iterations, with no checks. It plays its combo's average strategy, navigating the flop actions like the other streets.
+2. **Turn:** if the flop line stayed on the tree and ended at a turn leaf, both turn ranges are the flop root ranges times each player's flop strategy along the line (`_ranges_after_flop`), restricted to the turn card. Then comes the `range_tag_turn_fast` turn solve on those ranges. Otherwise the soft-filter estimate is used.
+3. **River:** the exact river solve from the turn solve's ranges (inherited).
+
+**Parameters:** `FLOP_ITERS = 150`, `FLOP_TURN_SAMPLES = 8` (the `tnet-150-s8` configuration above), `TORCH_THREADS = 1`. Turn and river parameters are inherited.
+
+**Measured in the arena** (heads-up smoke run, 120 hands):
+- flop solve median 0.96 s, p90 0.97 s;
+- turn solve median 0.38 s;
+- every flop, turn and river decision used its solve;
+- turn ranges came from the flop solve 12/12 times, river ranges from the turn solve 11/11 times.
+
 ---
 
-## 11. Commands
+## 13. Commands
 
 ```
 # build and tests
@@ -654,15 +815,26 @@ python -m river_net.preriver --n 3000
 # turn: quality check and speed benchmark (exact river re-solves)
 python -m river_net.turn_check --spots 20
 python -m river_net.turn_bench                 # writes results/turn_speed/bench.json
+
+# turn value network: data (turn solves) -> network -> evaluation
+python -m river_net.datagen --kind turn --n 30000 --out data/turn_v1
+python -m river_net.train --data data/turn_v1 --K 256 --scheme ehs2:8 --hidden 512 \
+    --epochs 200 --patience 10 --out runs/turn_k256 --save-model river_net/models/turn_k256.pt
+python -m river_net.preriver --model river_net/models/turn_k256.pt --data data/turn_v1 --n 1500
+
+# flop: quality check (turn-solver re-solves of every leaf x turn card)
+python -m river_net.flop_check --spots 10       # writes results/flop/flop_check.json
 ```
 
 Run Python commands from the repository root with `PYTHONPATH=.`, or use the venv with the package installed.
 
 ---
 
-## 12. Limitations
+## 14. Limitations
 
-- **No exact turn baseline.** Every turn number is relative to exact *river* play at fixed ranges. There is no full turn + river exact solve.
+- **No exact turn or flop baseline.** Turn numbers are relative to exact *river* play at fixed ranges. Flop numbers are relative to *turn-solver* play, itself approximate (river network, about 1.4% turn exploitability). There is no full exact multi-street solve.
+- **The turn network is trained on 30k samples only,** stopped early for the proof of concept, and overfits. Its test error (0.060) would likely drop with the full 100k.
+- **Flop setup cost.** About 0.6 s of each flop solve is setup (showdown matrix and turn bucket maps), and the flop root ranges are the bare preflop chart ranges.
 - **Approximations stack.** Pre-river leaves are an approximation of an approximation (pre-river network ≈ river network ≈ exact). Their errors add.
 - **Range estimates in the bots are heuristic.** They come from the chart and fixed soft filters, not from an opponent model.
 - **Bet abstraction.** A single abstraction is used (½ pot, pot, all-in; pot raise). Opponent sizes are mapped to the nearest tree action, with no re-solving after off-tree actions.

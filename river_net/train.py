@@ -125,7 +125,7 @@ def _scheme(data_dir, scheme):
     from .dataset import manifest
 
     try:
-        if manifest(data_dir)["config"].get("kind") != "preriver":
+        if manifest(data_dir)["config"].get("kind") not in ("preriver", "turn"):
             return None
     except (FileNotFoundError, KeyError):
         return scheme

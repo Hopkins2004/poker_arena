@@ -86,6 +86,7 @@ class NetworkLeaf:
     """River leaves valued by a :class:`river_net.model.RiverValueNet`."""
 
     name = "network"
+    deals = DEALS_PER_RIVER  # next-street cards each deal sees (44 rivers on a turn board)
 
     def __init__(self, net, threads: int | None = None):
         self.net = net
@@ -158,7 +159,7 @@ class NetworkLeaf:
         L = len(c)
         n = self.bmap.shape[0]
         f = 1.0 if cards is None else n / len(cards)
-        scale = (f * (1 + 2 * np.asarray(c, dtype=np.float64)) / DEALS_PER_RIVER).tolist()
+        scale = (f * (1 + 2 * np.asarray(c, dtype=np.float64)) / self.deals).tolist()
         o1, o2 = self.index.cfv(y, np.ascontiguousarray(R1, dtype=np.float64).ravel(),
                                 np.ascontiguousarray(R2, dtype=np.float64).ravel(), scale,
                                 None if cards is None else list(cards))
@@ -253,6 +254,10 @@ class TurnResult:
 class TurnSolver:
     """DCFR on a turn spot with a pluggable river-leaf evaluator.
 
+    Subclasses solve other streets with the same machinery by overriding
+    ``BOARD_CARDS``, ``ALLIN_DEALS`` (runouts each deal sees at an all-in) and
+    :meth:`_make_boards` (see :class:`river_net.flop.FlopSolver`).
+
     Speed options (all off by default, i.e. every iteration queries every leaf on every
     river card and evaluates every all-in showdown exactly):
 
@@ -267,12 +272,18 @@ class TurnSolver:
       a cheap leaf model and finished with another (:meth:`set_leaf`).
     """
 
+    BOARD_CARDS = 4
+    ALLIN_DEALS = DEALS_PER_RIVER
+
+    def _make_boards(self):
+        return _native.TurnBoards(self.board.tolist())
+
     def __init__(self, spot: Spot, leaf, abstraction: dict | None = None,
                  alpha=1.5, beta=0.0, gamma=2.0, refresh: int | None = None,
                  refresh_warmup: int = 10, river_samples: int | None = None, seed: int = 0):
         self.board = parse_board(spot.board)
-        if len(self.board) != 4:
-            raise ValueError("a turn spot has a 4-card board")
+        if len(self.board) != self.BOARD_CARDS:
+            raise ValueError(f"{type(self).__name__} needs a {self.BOARD_CARDS}-card board")
         self.valid = ~np.isin(HAND_CARDS, self.board).any(axis=1)
         r = [np.where(self.valid, np.asarray(x, dtype=np.float64), 0.0) for x in (spot.r1, spot.r2)]
         if min(x.sum() for x in r) <= 0:
@@ -293,7 +304,7 @@ class TurnSolver:
         self.allin = [i for i in sd if t.contrib[i][0] >= self.S - 1e-6]
         self.leaves = [i for i in sd if t.contrib[i][0] < self.S - 1e-6]
         self.leaf_c = np.array([float(t.contrib[i][0]) for i in self.leaves])
-        self.boards = _native.TurnBoards(self.board.tolist())
+        self.boards = self._make_boards()
         self.n_cards = len(self.boards.cards)
         self.regret = [np.zeros((t.n_slots[p], self.A, N_COMBOS)) for p in range(2)]
         self.ssum = [np.zeros((t.n_slots[p], self.A, N_COMBOS)) for p in range(2)]
@@ -368,7 +379,7 @@ class TurnSolver:
             self._W = np.asarray(self.boards.showdown_matrix()).reshape(N_COMBOS, N_COMBOS)
         q = np.concatenate([self.r[1 - p] * seq[1 - p][self.allin] for p in range(2)])
         net = (q.astype(np.float32) @ self._W.T).astype(np.float64)
-        k = (0.5 + self.S) / DEALS_PER_RIVER
+        k = (0.5 + self.S) / self.ALLIN_DEALS
         return [k * net[:A], k * net[A:]]
 
     def _terminal_values(self, seq, it=None):
