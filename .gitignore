@@ -17,3 +17,4 @@ __pycache__/
 /runs/
 !/results/river_net_poc.md
 !/results/river_net_poc/
+!/results/turn_speed/

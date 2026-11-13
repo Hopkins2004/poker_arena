@@ -46,14 +46,21 @@ def load_shard(path, keys=None) -> dict:
         return {k: z[k] for k in (keys or z.files)}
 
 
-def bucket_maps(boards: np.ndarray, K: int) -> np.ndarray:
+def bucket_maps(boards: np.ndarray, K: int, scheme: str | None = None) -> np.ndarray:
+    """Bucket maps of a batch of boards: river buckets for 5-card boards, turn buckets
+    (:func:`river_net.preriver.turn_bucket_map`, ``scheme``) for 4-card boards."""
+    boards = np.asarray(boards)
+    if boards.shape[1] == 4:
+        from .preriver import DEFAULT_SCHEME, turn_bucket_map
+
+        return np.stack([turn_bucket_map(b, K, scheme or DEFAULT_SCHEME) for b in boards])
     return np.stack([bucket_map(river_strengths(b), K) for b in boards])
 
 
 def _bucket_shard(args) -> dict:
-    path, K = args
+    path, K, scheme = args
     z = load_shard(path)
-    bmap = bucket_maps(z["board"], K)
+    bmap = bucket_maps(z["board"], K, scheme)
     out = {k: z[k] for k in ("index", "board", "pot", "stack", "spr", "expl", "source",
                              "scenario", "line")}
     for p in ("1", "2"):
@@ -66,16 +73,26 @@ def _bucket_shard(args) -> dict:
     return out
 
 
-def bucketed(data_dir, K: int, workers: int | None = None) -> dict:
-    """All samples bucketed at ``K`` (cached). Arrays are concatenated in shard order."""
+def bucketed(data_dir, K: int, workers: int | None = None, scheme: str | None = None) -> dict:
+    """All samples bucketed at ``K`` (cached). Arrays are concatenated in shard order.
+    Pre-river data (4-card boards) uses turn buckets of ``scheme`` (default
+    :data:`river_net.preriver.DEFAULT_SCHEME`), cached per scheme."""
     d = Path(data_dir)
-    n = manifest(d).get("n", 0)
-    cache = d / f"bucketed_K{K}.npz"
+    man = manifest(d)
+    n = man.get("n", 0)
+    if man["config"].get("kind") == "preriver":
+        from .preriver import DEFAULT_SCHEME
+
+        scheme = scheme or DEFAULT_SCHEME
+        cache = d / f"bucketed_K{K}_{scheme.replace(':', '-')}.npz"
+    else:
+        scheme = None
+        cache = d / f"bucketed_K{K}.npz"
     if cache.exists():
         with np.load(cache) as z:
             if int(z["n"]) == n and int(z["version"]) == CACHE_VERSION:
                 return {k: z[k] for k in z.files if k not in ("n", "version")}
-    tasks = [(p, K) for p in shard_paths(d)]
+    tasks = [(p, K, scheme) for p in shard_paths(d)]
     with mp.get_context("spawn").Pool(workers) as pool:
         parts = pool.map(_bucket_shard, tasks)
     out = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}

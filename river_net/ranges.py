@@ -213,12 +213,17 @@ class GeneratorConfig:
     max_attempts: int = 50
 
 
+# street -> (board cards, street lines played, extra seed word)
+STREETS = {"river": (5, 2, None), "turn": (4, 1, 4), "turn_end": (4, 2, 44)}
+
+
 class RangeGenerator:
     """Deterministic: ``generate(i)`` depends only on ``(seed, i)`` and the config."""
 
     def __init__(self, seed: int = 0, config: GeneratorConfig | None = None):
         self.seed = int(seed)
-        self._nb = 5  # board cards of the spot being generated (5 river, 4 turn)
+        self._nb = 5     # board cards of the spot being generated (5 river, 4 turn)
+        self._lines = 2  # street lines played before the spot (flop, turn)
         self.config = config or GeneratorConfig()
         self.scenarios = scenario_table()
         w = np.array([s.prob for s in self.scenarios])
@@ -236,13 +241,19 @@ class RangeGenerator:
     # -- public ------------------------------------------------------------------------
 
     def generate(self, index: int, source: str | None = None, street: str = "river") -> Spot:
-        """Spot number ``index`` (optionally forcing a source). ``street="turn"`` cuts the
-        same process one street earlier: 4-card board, only the flop line played (source B
-        then splits mass over turn equity vs a uniform range instead of river strength)."""
-        if street not in ("river", "turn"):
-            raise ValueError(f"street must be 'river' or 'turn', got {street!r}")
-        self._nb = 5 if street == "river" else 4
-        seed = [self.seed, int(index)] if street == "river" else [self.seed, int(index), 4]
+        """Spot number ``index`` (optionally forcing a source).
+
+        * ``street="river"``: 5-card board, flop and turn lines played (river solver data);
+        * ``street="turn"``: the same process cut one street earlier, 4-card board, only the
+          flop line played (turn-solver spots; source B splits mass over turn equity vs a
+          uniform range instead of river strength);
+        * ``street="turn_end"``: 4-card board, flop and turn lines played, i.e. a river spot
+          before the river card (pre-river network data, :mod:`river_net.preriver`).
+        """
+        if street not in STREETS:
+            raise ValueError(f"street must be one of {STREETS}, got {street!r}")
+        self._nb, self._lines, tag = STREETS[street]
+        seed = [self.seed, int(index)] + ([tag] if tag is not None else [])
         rng = np.random.default_rng(seed)
         src = source or SOURCES[int(rng.choice(3, p=self.source_p))]
         for _ in range(self.config.max_attempts):
@@ -292,7 +303,7 @@ class RangeGenerator:
     def _money_path(self, rng, sc):
         pot, stack = sc.pot_bb, sc.stack_bb
         lines = []
-        for _ in range(self._nb - 3):
+        for _ in range(self._lines):
             line, f = self._sample_line(rng, pot, stack)
             pot, stack = self._money(line, f, pot, stack)
             lines.append(line if line == "cc" else f"{line}{f:g}")
@@ -305,7 +316,7 @@ class RangeGenerator:
              expand(jitter_classes(sc.r_ip, rng), board[:3])]
         pot, stack = sc.pot_bb, sc.stack_bb
         lines = []
-        for street, nb in ((1, 3), (2, 4))[: self._nb - 3]:
+        for street, nb in ((1, 3), (2, 4))[: self._lines]:
             vis = board[:nb]
             if nb == 4:  # the turn card is now dead
                 turn_dead = (HAND_CARDS == board[3]).any(axis=1)

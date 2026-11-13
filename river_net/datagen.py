@@ -4,6 +4,11 @@ Each sample index ``i`` is generated (``RangeGenerator(seed).generate(i)``) and 
 (``solver.solve``) deterministically, so a dataset is reproducible from (seed, config) and a
 run can be resumed or extended: shards already listed in ``manifest.json`` are skipped.
 
+``--kind preriver --teacher river_net/models/river_k64.pt`` writes pre-river network data
+instead (:mod:`river_net.preriver`): turn-end spots (``generate(i, street="turn_end")``,
+4-card boards) labelled by the river network averaged over all river cards; no solves,
+``expl`` and ``iters`` are 0, ``m1, m2`` are turn-board masses, ``spr`` is the river SPR.
+
 Shard ``k`` holds samples ``[k * shard_size, (k + 1) * shard_size)`` as ``shard_00000.npz``
 with arrays (float32 unless noted): ``index`` int64, ``board`` uint8[5], ``pot``, ``stack``,
 ``spr``, ``r1, r2, v1, v2, m1, m2`` [1326], ``expl``, ``iters`` int16, ``source``,
@@ -33,15 +38,27 @@ FIELDS_1326 = ("r1", "r2", "v1", "v2", "m1", "m2")
 
 _gen: RangeGenerator | None = None
 _solve_cfg: dict = {}
+_teacher = None
 
 
 def _init(seed: int, gen_cfg: dict, solve_cfg: dict) -> None:
-    global _gen, _solve_cfg
+    global _gen, _solve_cfg, _teacher
     import signal
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)  # the parent handles Ctrl-C
     _gen = RangeGenerator(seed, GeneratorConfig(**gen_cfg))
     _solve_cfg = solve_cfg
+    if solve_cfg.get("kind") == "preriver":
+        from .model import RiverValueNet
+        from .preriver import Teacher
+
+        _teacher = Teacher(RiverValueNet.load(solve_cfg["teacher"]), threads=1)
+
+
+class _Labels:
+    def __init__(self, v1, v2, m1, m2):
+        self.v1, self.v2, self.m1, self.m2 = v1, v2, m1, m2
+        self.expl, self.iters = 0.0, 0
 
 
 def _work(indices: list) -> dict:
@@ -49,9 +66,15 @@ def _work(indices: list) -> dict:
                                  "expl", "iters", "source", "scenario", "line", "seconds")}
     for i in indices:
         t0 = time.perf_counter()
-        spot = _gen.generate(i)
-        res = solve(spot, iters=_solve_cfg["max_iters"], target_expl=_solve_cfg["target_expl"],
-                    check_every=_solve_cfg["check_every"], abstraction=_solve_cfg["abstraction"])
+        if _teacher is not None:
+            spot = _gen.generate(i, street="turn_end")
+            res = _Labels(*_teacher(spot.board, spot.spr, spot.r1, spot.r2))
+        else:
+            spot = _gen.generate(i)
+            res = solve(spot, iters=_solve_cfg["max_iters"],
+                        target_expl=_solve_cfg["target_expl"],
+                        check_every=_solve_cfg["check_every"],
+                        abstraction=_solve_cfg["abstraction"])
         out["index"].append(i)
         out["board"].append(spot.board)
         out["pot"].append(spot.pot)
@@ -97,6 +120,19 @@ def _write_atomic(path: Path, text: str) -> None:
 
 
 def _config(a) -> dict:
+    if a.kind == "preriver":
+        return {
+            "format": FORMAT,
+            "kind": "preriver",
+            "seed": a.seed,
+            "shard_size": a.shard_size,
+            "generator": asdict(GeneratorConfig()),
+            "street": "turn_end",
+            "solver": {"kind": "preriver", "teacher": str(a.teacher)},
+            "value_convention": "river-pot units; v = river-network values averaged over the "
+                                "river cards, weighted by compatible opponent mass (see "
+                                "river_net/preriver.py); m = turn-board compatible mass",
+        }
     return {
         "format": FORMAT,
         "seed": a.seed,
@@ -147,6 +183,9 @@ def main(argv=None) -> int:
     ap.add_argument("--target-expl", type=float, default=0.002)
     ap.add_argument("--check-every", type=int, default=50)
     ap.add_argument("--log-every", type=float, default=30.0, help="seconds")
+    ap.add_argument("--kind", choices=("river", "preriver"), default="river")
+    ap.add_argument("--teacher", type=Path, default=Path("river_net/models/river_k64.pt"),
+                    help="river network labelling --kind preriver data")
     a = ap.parse_args(argv)
 
     a.out.mkdir(parents=True, exist_ok=True)

@@ -21,7 +21,7 @@ crates/
   solver/    # exact river solver: vectorized public-tree DCFR over 1326 combos, range equity (engine only)
 python/      # PyO3 bindings (crate `arena_py`) + Python package `pokerarena` (baselines, runner, desktop GUI) + example bots
 bots/NLH/    # bots, one file each (anchored baselines)
-river_net/   # river value network PoC: solver wrapper, range generator, datagen, model (Python, uses _native.solver_*)
+river_net/   # river + pre-river value networks, turn solver: solver wrapper, range generator, datagen, models (Python, uses _native.solver_*); reference: bots/NLH/SOLVERS.md
 ranges/      # preflop range database (6-max 100bb, CC BY 4.0 source vendored) + converter; read via pokerarena.preflop
 configs/     # example TOML configs
 ```
@@ -93,6 +93,7 @@ cargo run --release -p cli -- bench                 # runs with bots: Poker Aren
 cargo clippy --workspace -- -D warnings && cargo fmt --check
 cd python && maturin develop --release && pytest
 python/.venv/bin/python -m pytest river_net/tests     # from the repo root
+python/.venv/bin/python -m river_net.turn_bench      # turn-solver speed/quality benchmark (bots/NLH/SOLVERS.md)
 cargo run --release -p solver --example bench_solve   # river solve times
 ```
 

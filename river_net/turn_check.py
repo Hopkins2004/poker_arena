@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import multiprocessing as mp
 import sys
-import time
 
 import numpy as np
 
@@ -110,8 +109,7 @@ def main(argv=None) -> int:
                     row["leaf.wmae"], row["leaf.mae"] = leaf_errors(ts, R1, R2, Vnet, Vex)
                     row["river_expl"] = river_expl
                 own_root = float((ts.r[0] * res.cfv1).sum())
-                ts.leaf = FixedLeaf(Vex)
-                ts.leaf.bind(ts.boards, ts.S)
+                ts.set_leaf(FixedLeaf(Vex))
                 row[f"{name}.expl_exact"] = ts.exploitability()
                 ex = ts._profile_values([ts._avg(0), ts._avg(1)])
                 row[f"{name}.root_err"] = abs(own_root - float((ts.r[0] * ex[0]).sum()))

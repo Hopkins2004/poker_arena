@@ -8,6 +8,7 @@ use pyo3::types::{PyDict, PyList};
 use solver::{Abstraction, Edge, HandSet, NodeKind, Params, Solver, Tree, N_COMBOS};
 
 type ArrayPair<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>);
+type ArrayPair64<'py> = (Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>);
 
 fn verr<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -408,18 +409,59 @@ impl TurnBoards {
         Ok(PyArray1::from_vec(py, out))
     }
 
+    /// The linear map behind [`showdown_net_sum`](Self::showdown_net_sum): flat
+    /// `[1326 * 1326]` matrix `W` with `W[h, h'] = Σ_c sign(str_c(h) − str_c(h'))` over the
+    /// river cards `c` both hands survive (0 unless `h`, `h'` are disjoint and valid), so
+    /// that `showdown_net_sum(q) = W @ q`. Lets a solver value many all-in nodes with one
+    /// matrix product.
+    fn showdown_matrix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        let out = py.detach(|| {
+            let cc = solver::combo_cards();
+            let mask: Vec<u64> = cc.iter().map(|[a, b]| (1u64 << a) | (1u64 << b)).collect();
+            let mut w = vec![0i32; N_COMBOS * N_COMBOS];
+            for rh in &self.rivers {
+                let hs: Vec<(usize, u16)> = rh
+                    .strength_1326
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &s)| s > 0)
+                    .map(|(h, &s)| (h, s))
+                    .collect();
+                for (i, &(h, sh)) in hs.iter().enumerate() {
+                    for &(g, sg) in &hs[i + 1..] {
+                        if mask[h] & mask[g] != 0 || sh == sg {
+                            continue;
+                        }
+                        let s = if sh > sg { 1 } else { -1 };
+                        w[h * N_COMBOS + g] += s;
+                        w[g * N_COMBOS + h] -= s;
+                    }
+                }
+            }
+            w.into_iter().map(|x| x as f32).collect::<Vec<f32>>()
+        });
+        PyArray1::from_vec(py, out)
+    }
+
     /// Showdown net (weaker − stronger compatible mass of `q`) summed over the river cards,
     /// for every combo: all-in leaves average this over the 44 cards each deal can see.
+    /// `cards`: indices of the river cards to sum over (default all).
+    #[pyo3(signature = (q, cards=None))]
     fn showdown_net_sum<'py>(
         &self,
         py: Python<'py>,
         q: PyReadonlyArray1<'py, f32>,
+        cards: Option<Vec<usize>>,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let q = slice(&q, N_COMBOS, "q")?;
+        let sel: Vec<usize> = cards.unwrap_or_else(|| (0..self.rivers.len()).collect());
+        if sel.iter().any(|&i| i >= self.rivers.len()) {
+            return Err(verr("card index out of range"));
+        }
         let out = py.detach(|| {
             let mut acc = vec![0f64; N_COMBOS];
             let mut sc = solver::terminal::TermScratch::default();
-            for rh in &self.rivers {
+            for rh in sel.iter().map(|&i| &self.rivers[i]) {
                 let g = rh.gather(q);
                 let mut net = vec![0f32; g.len()];
                 rh.set.index.prepare(&g, &mut sc);
@@ -434,6 +476,129 @@ impl TurnBoards {
     }
 }
 
+/// Batched river-leaf kernels of one turn board (see `solver::leaf`): network inputs and the
+/// broadcast of per-card bucket values back to counterfactual values, for `L` leaves at once.
+#[pyclass(module = "pokerarena._native", name = "LeafIndex")]
+pub struct LeafIndex {
+    ix: solver::leaf::LeafIndex,
+    k: usize,
+}
+
+fn leaf_ranges<'a>(
+    r1: &'a PyReadonlyArray1<'_, f64>,
+    r2: &'a PyReadonlyArray1<'_, f64>,
+) -> PyResult<(&'a [f64], &'a [f64], usize)> {
+    let (a, b) = (r1.as_slice().map_err(verr)?, r2.as_slice().map_err(verr)?);
+    if a.len() != b.len() || a.len() % N_COMBOS != 0 {
+        return Err(verr("r1 and r2 must both be [L * 1326]"));
+    }
+    Ok((a, b, a.len() / N_COMBOS))
+}
+
+impl LeafIndex {
+    fn check_sel(&self, cards: Option<Vec<usize>>) -> PyResult<Option<Vec<usize>>> {
+        if let Some(c) = &cards {
+            if c.iter().any(|&i| i >= self.ix.n_cards()) {
+                return Err(verr("card index out of range"));
+            }
+        }
+        Ok(cards)
+    }
+
+    fn rows(&self, sel: &Option<Vec<usize>>) -> usize {
+        sel.as_ref().map_or(self.ix.n_cards(), |s| s.len())
+    }
+}
+
+#[pymethods]
+impl LeafIndex {
+    /// `cards`: river cards (e.g. `TurnBoards.cards`); `bmap`: `[cards * 1326]` bucket of
+    /// every combo on each river board (negative = blocked); `k`: buckets per board.
+    #[new]
+    fn new(cards: Vec<u8>, bmap: PyReadonlyArray1<'_, i32>, k: usize) -> PyResult<Self> {
+        let ix = solver::leaf::LeafIndex::new(&cards, bmap.as_slice().map_err(verr)?, k)
+            .map_err(verr)?;
+        Ok(LeafIndex { ix, k })
+    }
+
+    /// Network inputs `(x, w)` for `L` leaves, each flat `[L * cards * 2K]`: normalised
+    /// bucket ranges and projection weights of both players. `r1`, `r2`: leaf reach
+    /// `[L * 1326]` (0 on combos blocked by the turn board); `q1`, `q2`: the reach the
+    /// opponent masses come from (normally `r1`, `r2`); `cards`: indices of the river cards
+    /// to evaluate (default all; outputs then have `len(cards)` card rows).
+    #[pyo3(signature = (r1, r2, q1, q2, cards=None))]
+    fn inputs<'py>(
+        &self,
+        py: Python<'py>,
+        r1: PyReadonlyArray1<'py, f64>,
+        r2: PyReadonlyArray1<'py, f64>,
+        q1: PyReadonlyArray1<'py, f64>,
+        q2: PyReadonlyArray1<'py, f64>,
+        cards: Option<Vec<usize>>,
+    ) -> PyResult<ArrayPair<'py>> {
+        let sel = self.check_sel(cards)?;
+        let (a, b, l) = leaf_ranges(&r1, &r2)?;
+        let (qa, qb, lq) = leaf_ranges(&q1, &q2)?;
+        if lq != l {
+            return Err(verr("q1, q2 must match r1, r2"));
+        }
+        let n = self.rows(&sel) * 2 * self.k;
+        let (x, w) = py.detach(|| {
+            let (mut x, mut w) = (vec![0f32; l * n], vec![0f32; l * n]);
+            for li in 0..l {
+                let rs = li * N_COMBOS..(li + 1) * N_COMBOS;
+                self.ix.inputs(
+                    sel.as_deref(),
+                    [&a[rs.clone()], &b[rs.clone()]],
+                    [&qa[rs.clone()], &qb[rs]],
+                    &mut x[li * n..(li + 1) * n],
+                    &mut w[li * n..(li + 1) * n],
+                );
+            }
+            (x, w)
+        });
+        Ok((PyArray1::from_vec(py, x), PyArray1::from_vec(py, w)))
+    }
+
+    /// Counterfactual leaf values `(cfv1, cfv2)`, each `[L * 1326]`, from per-card bucket
+    /// values `y` (`[L * cards * 2K]`, conditional, river-pot units) and `scale[L]`;
+    /// `cards`: the river cards `y` covers (default all).
+    #[pyo3(signature = (y, r1, r2, scale, cards=None))]
+    fn cfv<'py>(
+        &self,
+        py: Python<'py>,
+        y: PyReadonlyArray1<'py, f32>,
+        r1: PyReadonlyArray1<'py, f64>,
+        r2: PyReadonlyArray1<'py, f64>,
+        scale: Vec<f64>,
+        cards: Option<Vec<usize>>,
+    ) -> PyResult<ArrayPair64<'py>> {
+        let sel = self.check_sel(cards)?;
+        let (a, b, l) = leaf_ranges(&r1, &r2)?;
+        let n = self.rows(&sel) * 2 * self.k;
+        let y = slice(&y, l * n, "y")?;
+        if scale.len() != l {
+            return Err(verr("scale must have one entry per leaf"));
+        }
+        let (o1, o2) = py.detach(|| {
+            let (mut o1, mut o2) = (vec![0f64; l * N_COMBOS], vec![0f64; l * N_COMBOS]);
+            for li in 0..l {
+                let rs = li * N_COMBOS..(li + 1) * N_COMBOS;
+                let (p1, p2) = (&mut o1[rs.clone()], &mut o2[rs.clone()]);
+                self.ix.cfv(
+                    sel.as_deref(),
+                    &y[li * n..(li + 1) * n],
+                    [&a[rs.clone()], &b[rs]],
+                    scale[li],
+                    [p1, p2],
+                );
+            }
+            (o1, o2)
+        });
+        Ok((PyArray1::from_vec(py, o1), PyArray1::from_vec(py, o2)))
+    }
+}
+
 /// Registers the solver functions on `_native`.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_build_tree, m)?)?;
@@ -443,5 +608,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solver_range_equity, m)?)?;
     m.add_function(wrap_pyfunction!(solver_river_equity, m)?)?;
     m.add_class::<TurnBoards>()?;
+    m.add_class::<LeafIndex>()?;
     Ok(())
 }

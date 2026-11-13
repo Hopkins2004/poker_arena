@@ -23,13 +23,15 @@
 //!
 //! [`hands`] (sorted hand sets, river adapter), [`tree`] (bet abstraction, flat public
 //! tree), [`terminal`] (O(n) fold / showdown evaluation), [`dcfr`] (the solver),
-//! [`equity`] (range-vs-range equity used by the range generator).
+//! [`equity`] (range-vs-range equity used by the range generator), [`leaf`] (batched
+//! river-leaf kernels for depth-limited turn solving).
 
 #![warn(missing_docs)]
 
 pub mod dcfr;
 pub mod equity;
 pub mod hands;
+pub mod leaf;
 pub mod terminal;
 pub mod tree;
 

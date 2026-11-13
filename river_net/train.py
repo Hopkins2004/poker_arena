@@ -1,5 +1,8 @@
 """Train the river value network: ``python -m river_net.train --data data/v1 --K 64 --out runs/k64``.
 
+The same command trains the pre-river network on pre-river data (4-card boards, turn
+buckets): ``--data data/preriver_v1 --K 256 [--scheme ehs2:8]``.
+
 Loss: Huber (δ = 0.1 pot) per bucket, weighted by ``λ + (1 − λ)·K·r̄_i(k)`` (λ = 0.5; empty
 buckets weight 0), summed over both players' buckets and averaged over the batch. AdamW
 (lr 1e-3, cosine decay to 0 over the planned steps, weight decay 1e-4), batch 512, early
@@ -52,12 +55,12 @@ def evaluate_loss(model, tensors, K, batch=4096) -> float:
 
 def train(data_dir, K=64, out=None, board_features=False, hidden=64, depth=3, epochs=60,
           batch=512, lr=1e-3, weight_decay=1e-4, patience=6, n_train=None, seed=0,
-          threads=None, time_limit=None, quiet=False, data=None) -> dict:
+          threads=None, time_limit=None, quiet=False, data=None, scheme=None) -> dict:
     """Trains one model; returns a summary dict (and the model under "model")."""
     torch.manual_seed(seed)
     if threads:
         torch.set_num_threads(threads)
-    data = data if data is not None else bucketed(data_dir, K)
+    data = data if data is not None else bucketed(data_dir, K, scheme=scheme)
     tr = arrays(data, "train", board_features, limit=n_train, seed=seed)
     va = arrays(data, "val", board_features)
     T, V = _tensors(tr), _tensors(va)
@@ -103,7 +106,8 @@ def train(data_dir, K=64, out=None, board_features=False, hidden=64, depth=3, ep
     cfg = {"data": str(data_dir), "K": K, "board_features": board_features, "hidden": hidden,
            "depth": depth, "epochs": epochs, "batch": batch, "lr": lr,
            "weight_decay": weight_decay, "patience": patience, "n_train": len(T[0]),
-           "n_val": len(V[0]), "seed": seed, "loss": f"huber({HUBER_DELTA}) weighted "
+           "n_val": len(V[0]), "seed": seed, "scheme": _scheme(data_dir, scheme),
+           "loss": f"huber({HUBER_DELTA}) weighted "
            f"{LAMBDA} + {1 - LAMBDA}*K*rb"}
     summary = {"config": cfg, "best_val": best, "epochs_run": len(log),
                "seconds": time.time() - t0, "log": log, "model": model}
@@ -114,6 +118,20 @@ def train(data_dir, K=64, out=None, board_features=False, hidden=64, depth=3, ep
         (out / "log.json").write_text(json.dumps(log, indent=1))
         save(model, out / "best.pt", train_config=cfg, best_val=best)
     return summary
+
+
+def _scheme(data_dir, scheme):
+    """Turn bucket scheme of pre-river data (None for river data)."""
+    from .dataset import manifest
+
+    try:
+        if manifest(data_dir)["config"].get("kind") != "preriver":
+            return None
+    except (FileNotFoundError, KeyError):
+        return scheme
+    from .preriver import DEFAULT_SCHEME
+
+    return scheme or DEFAULT_SCHEME
 
 
 def main(argv=None) -> int:
@@ -132,10 +150,11 @@ def main(argv=None) -> int:
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--time-limit", type=float, default=None, help="seconds")
     ap.add_argument("--save-model", type=Path, default=None, help="copy best.pt here")
+    ap.add_argument("--scheme", default=None, help="turn bucket scheme (pre-river data)")
     a = ap.parse_args(argv)
     s = train(a.data, a.K, a.out, a.board_features, a.hidden, a.depth, a.epochs, a.batch, a.lr,
               patience=a.patience, n_train=a.n_train, threads=a.threads,
-              time_limit=a.time_limit)
+              time_limit=a.time_limit, scheme=a.scheme)
     print(f"best val loss {s['best_val']:.5f} after {s['epochs_run']} epochs "
           f"({s['seconds']:.0f}s, {s['config']['n_train']} train samples)", file=sys.stderr)
     if a.save_model:
