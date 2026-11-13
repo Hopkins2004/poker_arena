@@ -267,7 +267,7 @@ exploitability with exact river play, against check-down leaves.
 
 **Speed.** Native leaf kernels, a per-board showdown matrix for all-in nodes, and river
 sampling (`TurnSolver(..., river_samples=8)`) bring a turn solve from about 2.3 s to
-0.36 s, at 1.44% exploitability with exact river play.
+0.36 s, at 1.44% exploitability with exact river play (bot `range_tag_turn_fast`).
 - **Benchmark:** `python -m river_net.turn_bench` runs a fixed 20-spot set and scores every
   configuration by its exploitability with exact river play.
 - **Pre-river network:** an optional chance-averaged network (`river_net/preriver.py`,

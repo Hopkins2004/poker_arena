@@ -4,8 +4,8 @@
 * Turn, heads-up: estimates both turn ranges (preflop chart line, then the flop actions as
   equity-percentile soft filters, like ``range_solver``), solves the turn once per hand with
   ``river_net.turn.TurnSolver`` (DCFR, river leaves valued by the 3x512 river network
-  ``river_net/models/river_k64.pt``, plan ``TURN_PLAN``) and plays its own hand from the
-  average strategy. Opponent sizes off the tree map to the nearest tree action.
+  ``river_net/models/river_k64.pt``) and plays its own hand from the average strategy.
+  Opponent sizes off the tree map to the nearest tree action.
 * River, heads-up: the exact river solve of ``range_solver``. When the turn was solved and
   the turn line stayed on the tree, the river ranges are the turn solve's ranges carried
   through both players' turn strategies along the line actually played (Bayes), restricted
@@ -20,32 +20,20 @@ from pokerarena import preflop
 from bots.NLH.range_solver import COMBO_INDEX, LIVE, RangeSolver
 
 TURN = 2
-MODELS = {"net": "river_net/models/river_k64.pt", "pre": "river_net/models/preriver_k256.pt"}
-_NETS: dict = {}
+MODEL = "river_net/models/river_k64.pt"
+_NET = None
 
 
-def _leaf(kind: str, threads: int):
-    """A fresh leaf evaluator: "net" = river network on every river card, "pre" = pre-river
-    network (one query per leaf). Models load once per process."""
-    from pathlib import Path
+def _net():
+    global _NET
+    if _NET is None:
+        from pathlib import Path
 
-    root = Path(__file__).resolve().parents[2]
-    if kind not in _NETS:
-        if kind == "net":
-            from river_net.model import RiverValueNet
+        from river_net.model import RiverValueNet
 
-            _NETS[kind] = RiverValueNet.load(str(root / MODELS[kind]))
-        else:
-            from river_net.preriver import PreRiverNet
-
-            _NETS[kind] = PreRiverNet.load(str(root / MODELS[kind]))
-    if kind == "net":
-        from river_net.turn import NetworkLeaf
-
-        return NetworkLeaf(_NETS[kind], threads=threads)
-    from river_net.preriver import PreRiverLeaf
-
-    return PreRiverLeaf(_NETS[kind], threads=threads)
+        path = Path(__file__).resolve().parents[2] / MODEL
+        _NET = RiverValueNet.load(str(path))
+    return _NET
 
 
 class RangeSolverTurn(RangeSolver):
@@ -54,11 +42,9 @@ class RangeSolverTurn(RangeSolver):
     NAME = "range_solver_turn"
     ANCHOR = None
 
-    # Turn solve plan: stages of (leaf model, DCFR iterations, river cards sampled per
-    # iteration or None for all 48), run back to back on one solver (a later stage continues
-    # the earlier one's regrets). No exploitability checks: chosen on the fixed benchmark
-    # (``python -m river_net.turn_bench``, see bots/NLH/SOLVERS.md).
-    TURN_PLAN = (("net", 150, 8),)   # 0.36 s, 1.44% expl@exact (benchmark median)
+    TURN_ITERS = 200          # maximum turn DCFR iterations
+    TURN_TARGET = 0.01        # stop at 1% of the turn pot (depth-limited exploitability)
+    TURN_CHECK = 50           # exploitability check interval
     TORCH_THREADS = 1         # arena runs tables in parallel processes
 
     def __init__(self, seed: int = 0):
@@ -122,7 +108,7 @@ class RangeSolverTurn(RangeSolver):
 
     def _solve_turn(self, obs, live):
         from river_net.solver import Spot
-        from river_net.turn import TurnSolver
+        from river_net.turn import NetworkLeaf, TurnSolver
 
         n = obs.n_seats
         board = [int(c) for c in obs.board]
@@ -138,16 +124,9 @@ class RangeSolverTurn(RangeSolver):
             return None
         spot = Spot(np.array(board, dtype=np.uint8), float(pot0), float(min(behind)),
                     ranges[0], ranges[1])
-        ts = None
-        for kind, iters, samples in self.TURN_PLAN:
-            leaf = _leaf(kind, self.TORCH_THREADS)
-            if ts is None:
-                ts = TurnSolver(spot, leaf, river_samples=samples,
-                                seed=int(self.nrng.integers(1 << 31)))
-            else:
-                ts.set_leaf(leaf)
-                ts.river_samples = samples
-            res = ts.solve(iters=iters, target_expl=0.0, check_every=0)
+        ts = TurnSolver(spot, NetworkLeaf(_net(), threads=self.TORCH_THREADS))
+        res = ts.solve(iters=self.TURN_ITERS, target_expl=self.TURN_TARGET,
+                       check_every=self.TURN_CHECK)
         self.stats["turn_solves"] += 1
         return res, float(pot0), players, me, ts.r
 

@@ -1,6 +1,6 @@
 # River and turn solvers: technical reference
 
-This is the reference for the solver stack behind the `range_solver` and `range_solver_turn` bots. It covers:
+This is the reference for the solver stack behind the `range_solver`, `range_solver_turn` and `range_tag_turn_fast` bots. It covers:
 
 - the conventions and data types;
 - the exact river solver;
@@ -30,6 +30,7 @@ range generator (river_net/ranges.py) ──► river spots ──► exact rive
                                                   pre-river network   river_net/models/preriver_k256.pt
 turn spot ──► turn solver (river_net/turn.py): DCFR on the turn tree, leaves valued by either network
 bots: range_tag ─► range_solver (exact river) ─► range_solver_turn (turn solve + exact river)
+                                                 └► range_tag_turn_fast (sampled, fixed-plan turn solve)
 ```
 
 ---
@@ -572,7 +573,7 @@ The next step would be moving the turn CFR loop into Rust, as was done for the r
 
 ## 10. Bots
 
-All three bots are unanchored, live in `bots/NLH/`, and play preflop from the chart.
+All four bots are unanchored, live in `bots/NLH/`, and play preflop from the chart.
 
 ### `range_tag.py`
 
@@ -609,10 +610,17 @@ All three bots are unanchored, live in `bots/NLH/`, and play preflop from the ch
 - **Turn ranges:** the same estimate, filtered by the flop actions only (`streets=((1, 3),)`).
 - **Turn solve:** once per hand at the bot's first turn decision with `TurnSolver(spot, leaf)`. The bot plays its combo's average strategy at the current node, mapping opponent sizes the same way.
 - **River:** the exact river solve of `range_solver`. When the turn was solved and the turn line stayed on the tree, the river ranges are the turn solve's root ranges multiplied by both players' turn strategies along the line played (`_ranges_after_turn`), restricted to the river card. Otherwise the soft-filter estimate is used.
-- **Parameters:** `TURN_PLAN = (("net", 150, 8),)` (river network leaves, 150 DCFR iterations, 8 sampled river cards per iteration, no exploitability checks) and `TORCH_THREADS = 1`.
+- **Parameters:** `TURN_ITERS = 200` (maximum DCFR iterations), `TURN_TARGET = 0.01` (stop below 1% of the turn pot, own-model exploitability), `TURN_CHECK = 50` (check interval), all 48 river cards, `TORCH_THREADS = 1`.
+- **Measured cost in the arena:** median 0.86 s (p90 1.14 s) per turn solve. It was 2.24 s before the exact speedups, which it shares (same results up to float rounding).
 
-  - **Measured cost in the arena:** median 0.43 s (p90 0.46 s) per turn solve, including range estimation and setup, against 2.24 s before the speed work.
-  - **Plan stages:** the plan is a tuple of stages `(leaf, iterations, samples)` run on one solver. For example, `(("net", 100, 8),)` is faster (0.26 s, 1.73% on the benchmark), and `(("pre", 60, None), ("net", 40, 8))` is a pre-river warm start (0.25 s, 2.11%).
+### `range_tag_turn_fast.py`
+
+`range_solver_turn` with the fast turn solve chosen on the benchmark. Everything else (ranges, navigation, river) is inherited unchanged.
+
+- **Parameters:** `TURN_PLAN = (("net", 150, 8),)`: river network leaves, 150 DCFR iterations, 8 sampled river cards per iteration, no exploitability checks.
+  - **Benchmark:** 0.36 s and 1.44% expl@exact.
+  - **Measured cost in the arena:** median 0.42 s (p90 0.42 s) per turn solve, including range estimation and setup.
+- **Plan stages:** the plan is a tuple of stages `(leaf, iterations, samples)` run back to back on one solver. For example, `(("net", 100, 8),)` is faster (0.26 s, 1.73% on the benchmark), and `(("pre", 60, None), ("net", 40, 8))` is a pre-river warm start (0.25 s, 2.11%).
 
 **Arena** (heads-up, duplicate, 4,800 hands per bot, before the speed work):
 
